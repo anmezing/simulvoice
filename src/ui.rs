@@ -290,6 +290,21 @@ impl eframe::App for SettingsApp {
                     ui.label("出向输出(虚拟麦)");
                     ui.text_edit_singleline(&mut self.cfg.audio.remote_output_device);
                     ui.end_row();
+                    ui.label("回环采集设备");
+                    ui.text_edit_singleline(&mut self.cfg.audio.loopback_device);
+                    ui.end_row();
+                    ui.label("实时模型");
+                    ui.text_edit_singleline(&mut self.cfg.realtime.model);
+                    ui.end_row();
+                    ui.label("实时音色(入向)");
+                    ui.text_edit_singleline(&mut self.cfg.realtime.voice);
+                    ui.end_row();
+                    ui.label("实时音色(出向)");
+                    ui.text_edit_singleline(&mut self.cfg.realtime.voice_reverse);
+                    ui.end_row();
+                    ui.label("实时输出设备");
+                    ui.text_edit_singleline(&mut self.cfg.realtime.output_device);
+                    ui.end_row();
                     ui.label("实时引擎");
                     combo(ui, "rt", &mut self.cfg.realtime.provider, &["none", "gemini-live", "palabra", "volcengine"]);
                     ui.end_row();
@@ -410,6 +425,7 @@ impl eframe::App for SettingsApp {
         });
     }
 }
+
 
 
 

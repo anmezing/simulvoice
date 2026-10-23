@@ -131,6 +131,7 @@ pub fn ensure_layout() {
 }
 
 pub fn set_data_dir(path: &str) -> anyhow::Result<()> {
+    let old = data_dir();
     let p = PathBuf::from(path);
     if p.as_os_str().is_empty() {
         anyhow::bail!("数据目录不能为空");
@@ -141,6 +142,13 @@ pub fn set_data_dir(path: &str) -> anyhow::Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&marker, p.display().to_string())?;
+    for name in ["keys.toml", "simulvoice.toml"] {
+        let src = old.join(name);
+        let dst = p.join(name);
+        if src.exists() && !dst.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
     Ok(())
 }
 
@@ -172,5 +180,6 @@ pub fn move_data(old: &Path, new: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
 
 

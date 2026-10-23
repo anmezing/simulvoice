@@ -275,7 +275,8 @@ impl VolcSession {
             "wss://openspeech.bytedance.com/api/v4/ast/v2/translate\
              ?api_resource_id={resource}&api_app_key={app_key}&api_access_key={access_key}"
         );
-        let (mut ws, _) = connect(&url)?;
+        let (mut ws, _) = connect(&url)
+        .map_err(|e| anyhow!("WS: {}", crate::http::redact(&e.to_string())))?;
         if let MaybeTlsStream::Rustls(s) = ws.get_mut() {
             let _ = s.sock.set_read_timeout(Some(Duration::from_millis(50)));
         }
@@ -342,5 +343,6 @@ impl VolcSession {
         out
     }
 }
+
 
 

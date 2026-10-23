@@ -25,12 +25,14 @@ pub fn init(level: f32) {
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let mut saved: Vec<(ISimpleAudioVolume, f32)> = Vec::new();
+        let mut depth: usize = 0;
         let our_pid = std::process::id();
 
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Cmd::Duck => {
-                    if !saved.is_empty() {
+                    depth += 1;
+                    if depth > 1 {
                         continue;
                     }
                     let Ok(enumerator) =
@@ -71,8 +73,13 @@ pub fn init(level: f32) {
                     }
                 }
                 Cmd::Restore => {
-                    for (vol, previous) in saved.drain(..) {
-                        let _ = vol.SetMasterVolume(previous, std::ptr::null());
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        for (vol, previous) in saved.drain(..) {
+                            let _ = vol.SetMasterVolume(previous, std::ptr::null());
+                        }
                     }
                 }
             }
@@ -91,4 +98,5 @@ pub fn restore() {
         let _ = tx.send(Cmd::Restore);
     }
 }
+
 

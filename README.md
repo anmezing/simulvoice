@@ -33,7 +33,7 @@ cargo build --release
 - **安装版**：运行 `SimulVoiceSetup-*.exe`（安装向导支持中文/英文），默认安装到 `C:\Users\<你>\AppData\Local\Programs\SimulVoice`，可修改安装位置
   - 自动创建开始菜单快捷方式（可选桌面快捷方式）
   - 卸载：Windows 设置 → 应用 → SimulVoice，或开始菜单里的「Uninstall SimulVoice」
-  - 数据默认在 `<安装目录>\data`，随安装位置变化；卸载时一并删除
+  - 数据默认在 `<安装目录>\data`，随安装位置变化；卸载会保留数据，需手动删除 `data` 目录
 - **便携版**：解压 zip 直接运行 `simulvoice.exe`，数据默认在 `<exe 目录>\data`（相对标记，整体搬走数据跟随）
 ## 快速开始
 
@@ -46,7 +46,7 @@ simulvoice settings         # 图形化设置（预设 / 密钥 / 模型下载 /
 simulvoice preset teams     # 双向同传（Teams / Zoom）
 simulvoice preset game      # 游戏听译（只显示字幕）
 simulvoice preset record    # 会议记录（字幕 + 转写文件）
-simulvoice doctor           # 自检设备/密钥/模型/路由
+simulvoice doctor --online  # 自检设备/密钥/模型/路由，并校验 Key 有效性
 simulvoice run              # 使用数据目录里的 simulvoice.toml
 ```
 
@@ -123,9 +123,9 @@ version = 1
 [stt]        provider, language, language_reverse, api_key_env, model, model_path
 [translate]  provider, target, target_reverse, extra_targets, model, endpoint, api_key_env, glossary
 [tts]        provider, voice, voice_reverse, model, api_key_env, rate, model_dir
-[audio]      input, pid, duplex, mode, mic_device, output_device, remote_output_device, vad_rms, silence_ms
+[audio]      input, loopback_device, pid, duplex, mode, barge_in, mic_device, output_device, remote_output_device, vad_rms, silence_ms
 [dsp]        denoise, vad, agc, duck
-[ui]         subtitles, transcript_path, record_dir
+[ui]         subtitles, transcript_path, record_dir, record_max_mb
 [realtime]   provider, model, voice, voice_reverse, output_device
 ```
 
@@ -144,14 +144,18 @@ WASAPI / 进程回环 / 麦克风
 
 ## 已知限制
 
-- 仅 Windows（macOS 需要 CoreAudio/BlackHole 移植）
-- 热键静音只影响经典链路与火山 TTS；Gemini/Palabra 自带音频播放不受 F9 控制
-- 自动打断默认关闭（避免漏听对方译文），可在设置里开启或按 Ctrl+Alt+F8 手动停止；ducking 覆盖经典链路及 Gemini/Palabra/火山\n- 额外字幕语言仍只作用于经典链路（实时引擎固定单目标）
-- 未实现：按前台进程切换配置、模型量化/DirectML、代码签名
-
+- 仅 Windows
+- 未实现系统级 AEC：耳机漏音可能被麦克风拾取，建议使用封闭式耳机
+- 多语言额外字幕、barge-in 的自动模式只作用于经典链路；实时引擎固定单目标
+- 语音持续且 TTS 明显跟不上时，队列满会丢弃句子（默认上限 16 句）
+- 卸载保留 `<安装目录>\data`，避免误删模型与录音；需要时手动删除
+- 未实现：按前台进程切换配置、模型量化/DirectML、代码签名、运行看门狗
 ## License
 
 MIT
+
+
+
 
 
 

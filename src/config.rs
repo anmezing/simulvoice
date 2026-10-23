@@ -68,6 +68,8 @@ pub struct TtsConfig {
 pub struct AudioConfig {
     /// loopback | pid | mic
     pub input: String,
+    /// 回环采集的渲染设备名（空=默认输出设备）
+    pub loopback_device: String,
     pub pid: u32,
     /// 入向输出设备名（子串匹配），空=系统默认
     pub output_device: String,
@@ -113,6 +115,8 @@ pub struct UiConfig {
     pub transcript_path: String,
     /// 录音目录（原声 WAV + 译文 MP3；空=不录音）
     pub record_dir: String,
+    /// 录音总大小上限（MB，0=不限）
+    pub record_max_mb: u64,
 }
 
 impl Default for Config {
@@ -176,6 +180,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             input: "loopback".into(),
+            loopback_device: String::new(),
             pid: 0,
             output_device: String::new(),
             mic_device: String::new(),
@@ -211,6 +216,7 @@ impl Default for UiConfig {
             subtitles: false,
             transcript_path: String::new(),
             record_dir: String::new(),
+            record_max_mb: 2048,
         }
     }
 }
@@ -312,6 +318,7 @@ rate = "+0%"
 
 [audio]
 input = "loopback"             # loopback | pid | mic
+loopback_device = ""           # 回环采集设备名（空=默认输出）
 pid = 0
 output_device = ""             # 你听到的译文（建议耳机，且不同于采集设备）
 mic_device = ""                # 你的麦克风（空=默认）
@@ -333,6 +340,7 @@ duck = true                    # 朗读时压低其他应用音量
 subtitles = false              # 双语字幕悬浮窗
 transcript_path = ""           # 双语转写导出文件（空=不导出）
 record_dir = ""               # 录音目录（原声 WAV + 译文 MP3）
+record_max_mb = 2048          # 录音总大小上限（MB，0=不限）
 
 [realtime]
 provider = "none"              # none | gemini-live（端到端语音翻译）
@@ -370,7 +378,7 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
         "teams" => {
             cfg.audio.duplex = true;
             cfg.audio.remote_output_device = "CABLE".into();
-            cfg.audio.output_device = "耳机".into();
+            cfg.audio.output_device = String::new();
             cfg.stt.language = "en".into();
             cfg.stt.language_reverse = "zh".into();
             cfg.translate.target = "Chinese".into();
@@ -398,6 +406,8 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+
 
 
 

@@ -1,0 +1,59 @@
+# simulvoice 配置
+version = 1：三个阶段可任意组合（本地 / 在线 / 混合）
+
+[stt]
+# soniox(在线流式) | openai(在线) | vosk(本地, 需先 models vosk) | none
+provider = "soniox"
+language = "auto"              # 入向(对方→你)识别语言
+language_reverse = "auto"      # 出向(你→对方)识别语言
+api_key_env = "SONIOX_API_KEY"
+model = "gpt-4o-mini-transcribe"
+model_path = ""                # 空则用 ~/simulvoice/models/vosk
+
+[translate]
+# ollama(本地) | openai | gemini | qwen | custom | none
+provider = "ollama"
+target = "Chinese"             # 入向(对方→你)
+target_reverse = "English"     # 出向(你→对方)
+model = "qwen2.5:3b"
+endpoint = "http://127.0.0.1:11434"   # ollama / custom 的地址
+api_key_env = "OPENAI_API_KEY"
+glossary = ""                  # 术语表，每行「原文=译文」
+
+[tts]
+# edge(在线免费) | sapi(本地 Windows 语音) | openai(在线) | none
+provider = "edge"
+voice = "zh-CN-XiaoxiaoNeural"        # 入向音色
+voice_reverse = "en-US-AriaNeural"    # 出向音色
+model = "gpt-4o-mini-tts"
+api_key_env = "OPENAI_API_KEY"
+rate = "+0%"
+
+[audio]
+input = "loopback"             # loopback | pid | mic
+pid = 0
+output_device = ""             # 你听到的译文（建议耳机，且不同于采集设备）
+mic_device = ""                # 你的麦克风（空=默认）
+remote_output_device = ""      # 对方听到的译文，如 "CABLE"
+duplex = false                 # true = 双向同传
+mode = "both"                  # both | listen | speak
+vad_rms = 250
+silence_ms = 450
+max_utterance_ms = 8000
+
+[dsp]
+denoise = true                 # RNNoise 降噪（48k 源）
+vad = "silero"                 # silero | energy
+agc = true                     # 麦克风自动增益
+
+[ui]
+subtitles = false              # 双语字幕悬浮窗
+transcript_path = ""           # 双语转写导出文件（空=不导出）
+record_dir = ""               # 录音目录（原声 WAV + 译文 MP3）
+
+[realtime]
+provider = "none"              # none | gemini-live（端到端语音翻译）
+model = "models/gemini-3.8-live"
+voice = "Puck"
+voice_reverse = "Puck"
+output_device = ""

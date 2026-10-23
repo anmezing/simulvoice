@@ -1,0 +1,13 @@
+/target
+/models
+/dist
+/rec
+/instance.lock
+/keys.toml
+/keys*.toml
+*.bak
+*.log
+*.wav
+*.mp3
+/stt_out*.txt
+/tr*_encode.txt

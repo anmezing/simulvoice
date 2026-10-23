@@ -7,6 +7,8 @@ $dist = Join-Path $PSScriptRoot "dist\simulvoice-$version"
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item "target\release\simulvoice.exe" $dist
 Copy-Item "README.md" $dist
+Copy-Item "install.ps1" $dist
+Copy-Item "uninstall.ps1" $dist
 if (Test-Path "examples\simulvoice.toml") { Copy-Item "examples\simulvoice.toml" "$dist\simulvoice.toml" }
 foreach ($extra in @("simulvoice.toml")) {
     if (Test-Path $extra) { Copy-Item $extra $dist }
@@ -15,6 +17,7 @@ $zip = "$dist.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$dist\*" -DestinationPath $zip
 Write-Host "打包完成: $zip"
+
 
 
 

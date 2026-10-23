@@ -98,6 +98,8 @@ pub struct DspConfig {
     pub vad_model: String,
     /// 麦克风自动增益
     pub agc: bool,
+    /// 朗读时压低其他应用音量
+    pub duck: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -191,6 +193,7 @@ impl Default for DspConfig {
             denoise: true,
             vad: "silero".into(),
             agc: true,
+            duck: true,
             vad_model: default_models_dir()
                 .join("silero_vad_v5.onnx")
                 .display()
@@ -320,6 +323,7 @@ max_utterance_ms = 8000
 denoise = true                 # RNNoise 降噪（48k 源）
 vad = "silero"                 # silero | energy
 agc = true                     # 麦克风自动增益
+duck = true                    # 朗读时压低其他应用音量
 
 [ui]
 subtitles = false              # 双语字幕悬浮窗
@@ -390,6 +394,7 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
 
 
 

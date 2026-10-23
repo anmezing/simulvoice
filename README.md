@@ -9,7 +9,7 @@ Windows 上的实时语音同传工具：捕获系统或指定进程的声音（
 - **翻译**：OpenAI、Gemini、Qwen、任意 OpenAI 兼容端点、Ollama（本地）
 - **TTS**：Edge（免费）、OpenAI、Windows SAPI、Piper（离线）
 - **端到端实时引擎**：Gemini Live、Palabra.ai、火山引擎 Doubao（语音/文本直出）
-- **音频处理**：RNNoise 降噪、Silero VAD、AGC、抖动缓冲、16/24/32-bit 与 float 格式
+- **音频处理**：RNNoise 降噪、Silero VAD、AGC、抖动缓冲、16/24/32-bit 与 float 格式、朗读时压低其他应用音量
 - **交互**：双语置顶字幕、多语言额外字幕、托盘图标、全局热键、barge-in 打断
 - **工程**：录音回放、双语转写导出、场景预设、自检、单实例、断线重连、DPAPI 密钥加密
 
@@ -136,7 +136,7 @@ version = 1
 [translate]  provider, target, target_reverse, extra_targets, model, endpoint, api_key_env, glossary
 [tts]        provider, voice, voice_reverse, model, api_key_env, rate, model_dir
 [audio]      input, pid, duplex, mode, mic_device, output_device, remote_output_device, vad_rms, silence_ms
-[dsp]        denoise, vad, agc
+[dsp]        denoise, vad, agc, duck
 [ui]         subtitles, transcript_path, record_dir
 [realtime]   provider, model, voice, voice_reverse, output_device
 ```
@@ -158,12 +158,13 @@ WASAPI / 进程回环 / 麦克风
 
 - 仅 Windows（macOS 需要 CoreAudio/BlackHole 移植）
 - 热键静音只影响经典链路与火山 TTS；Gemini/Palabra 自带音频播放不受 F9 控制
-- Barge-in 仅在经典链路生效；额外字幕语言也只作用于经典链路（实时引擎固定单目标）
-- 未实现：多目标语言、TTS ducking、按前台进程切换配置、模型量化/DirectML、代码签名
+- Barge-in 与 TTS ducking 仅在经典链路/火山 TTS 生效；额外字幕语言也只作用于经典链路（实时引擎固定单目标）
+- 未实现：按前台进程切换配置、模型量化/DirectML、代码签名
 
 ## License
 
 MIT
+
 
 
 

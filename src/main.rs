@@ -39,6 +39,8 @@ static TRANSCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn log_transcript(side: &str, src: &str, dst: &str) {
     use std::io::Write;
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().ok();
     let Some(path) = TRANSCRIPT.get() else {
         return;
     };
@@ -65,7 +67,7 @@ fn preset(args: &[String]) -> Result<()> {
     cfg.save(&path)?;
     println!("已写入 {path}");
     match name {
-        "teams" => println!("Teams 双向：麦克风选 CABLE Output，output_device 改成耳机名"),
+        "teams" => println!("Teams 双向：麦克风选 CABLE Output，务必把 output_device 设为耳机（留空会自激）"),
         "game" => println!("游戏听译：input=loopback 或 pid，output_device 建议耳机"),
         "record" => println!("会议记录：仅字幕 + transcript.txt"),
         _ => {}
@@ -102,6 +104,30 @@ fn doctor(args: &[String]) -> Result<()> {
     for n in sink::list_input_devices()? {
         println!("  - {n}");
     }
+    if args.iter().any(|a| a == "--online") {
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            match crate::http::agent()
+                .get("https://api.openai.com/v1/models")
+                .set("Authorization", &format!("Bearer {k}"))
+                .call()
+            {
+                Ok(_) => println!("  ✓ OpenAI Key 有效"),
+                Err(ureq::Error::Status(code, _)) => println!("  ✗ OpenAI Key 无效 (HTTP {code})"),
+                Err(e) => println!("  - OpenAI 校验失败: {e}"),
+            }
+        }
+        if let Ok(k) = std::env::var("GEMINI_API_KEY") {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models?key={k}"
+            );
+            match crate::http::agent().get(&url).call() {
+                Ok(_) => println!("  ✓ Gemini Key 有效"),
+                Err(ureq::Error::Status(code, _)) => println!("  ✗ Gemini Key 无效 (HTTP {code})"),
+                Err(e) => println!("  - Gemini 校验失败: {e}"),
+            }
+        }
+    }
+
     if cfg.audio.input == "loopback" && !cfg.audio.output_device.trim().is_empty() {
         if let Some(def) = sink::default_output_name() {
             let a = cfg.audio.output_device.to_lowercase();
@@ -129,7 +155,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.14.1 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.15.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -146,7 +172,7 @@ fn help() {
   simulvoice config-init [文件]               生成配置模板
   simulvoice settings [--config <文件>]       图形化设置面板
   simulvoice preset <teams|game|record>       生成场景预设配置
-  simulvoice doctor [--config <文件>]         自检设备/密钥/模型/路由
+  simulvoice doctor [--config <文件>] [--online]  自检设备/密钥/模型/路由/Key 有效性
   simulvoice keys encrypt|test [--config]     DPAPI 加密 keys.toml / 自测
   simulvoice say <文本> [--local] [--voice] [--out a.mp3]
   simulvoice translate <文本> [--to <语言>]
@@ -244,6 +270,7 @@ fn main() -> Result<()> {
         Some("ttstest") => {
             let cfg = Config::load(flag(&args, "--config").as_deref())?;
             let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
+            recorder::set_limit(cfg.ui.record_max_mb);
             let text = args.get(1).cloned().unwrap_or_else(|| "这是一次较长的语音合成测试，用来验证分句与流式播放。".into());
             let mut edge = None;
             let mut cache = std::collections::HashMap::new();
@@ -561,7 +588,7 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
     };
     let tts_sink = std::sync::Arc::new(rodio::Sink::try_new(&tts_handle)?);
     let tts_sink_thread = tts_sink.clone();
-    let (text_tx, text_rx) = channel::<String>();
+    let (text_tx, text_rx) = std::sync::mpsc::sync_channel::<String>(16);
     std::thread::spawn(move || {
         let sherpa = if p.tts.provider == "sherpa" {
             let dir = if p.tts.model_dir.trim().is_empty() {
@@ -598,21 +625,6 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
             };
             println!("[{}] 译文: {translated}", p.label);
             log_transcript(p.label, &text, &translated);
-            let mut extra_out = Vec::new();
-            for (lang, tr) in p.extras.iter_mut() {
-                match tr.translate(&text) {
-                    Ok(t) => {
-                        println!("[{}] 额外({lang}): {t}", p.label);
-                        extra_out.push((lang.clone(), t));
-                    }
-                    Err(e) => eprintln!("[{}] 额外翻译失败({lang}): {e}", p.label),
-                }
-            }
-            if let Some(s) = &p.subs {
-                if let Ok(mut g) = s.lock() {
-                    g.set_extras(p.outbound, extra_out);
-                }
-            }
             if let Some(s) = &p.subs {
                 if let Ok(mut g) = s.lock() {
                     if p.outbound { g.set_out(String::new(), translated.clone()) } else { g.set_in(String::new(), translated.clone()) }
@@ -628,6 +640,21 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
             );
             if let Err(e) = result {
                 eprintln!("[{}] 播放失败: {e}", p.label);
+            }
+            let mut extra_out = Vec::new();
+            for (lang, tr) in p.extras.iter_mut() {
+                match tr.translate(&text) {
+                    Ok(t) => {
+                        println!("[{}] 额外({lang}): {t}", p.label);
+                        extra_out.push((lang.clone(), t));
+                    }
+                    Err(e) => eprintln!("[{}] 额外翻译失败({lang}): {e}", p.label),
+                }
+            }
+            if let Some(s) = &p.subs {
+                if let Ok(mut g) = s.lock() {
+                    g.set_extras(p.outbound, extra_out);
+                }
             }
         }
     });
@@ -681,7 +708,9 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
                 }
                 VadEvent::End => match p.stt.end_utterance() {
                     Ok(Some(text)) => {
-                        let _ = text_tx.send(text);
+                        if let Err(std::sync::mpsc::TrySendError::Full(_)) = text_tx.try_send(text) {
+                            eprintln!("[{}] 翻译队列已满，丢弃一句", p.label);
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => eprintln!("[{}] 识别失败: {e}", p.label),
@@ -689,7 +718,9 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
             }
         }
         for text in p.stt.poll_final() {
-            let _ = text_tx.send(text);
+            if let Err(std::sync::mpsc::TrySendError::Full(_)) = text_tx.try_send(text) {
+                eprintln!("[{}] 翻译队列已满，丢弃一句", p.label);
+            }
         }
         if let Some(pt) = p.stt.partial() {
             if let Some(s) = &subs_partial {
@@ -861,7 +892,12 @@ fn run_realtime(
             let mut session = match palabra::PalabraSession::connect(&pcfg, Some(&out_device)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[{label}] Palabra 连接失败: {e}，重连中...");
+                    let msg = e.to_string();
+                    eprintln!("[{label}] Palabra 连接失败: {msg}");
+                    if msg.contains("401") || msg.contains("403") || msg.contains("Unauthorized") {
+                        eprintln!("[{label}] Palabra 认证失败，停止重连");
+                        return Ok(());
+                    }
                     std::thread::sleep(Duration::from_millis(800));
                     continue;
                 }
@@ -909,7 +945,13 @@ fn run_realtime(
                             log_transcript(label, &src_buf, &t);
                         }
                         palabra::PalabraEvent::Audio => {}
-                        palabra::PalabraEvent::Error(e) => eprintln!("[{label}] palabra: {e}"),
+                        palabra::PalabraEvent::Error(e) => {
+                            eprintln!("[{label}] palabra: {e}");
+                            if e.contains("401") || e.contains("403") || e.contains("UNAUTHORIZED") {
+                                eprintln!("[{label}] Palabra 认证失败，停止重连");
+                                return Ok(());
+                            }
+                        }
                         palabra::PalabraEvent::Closed => {
                             disconnected = true;
                         }
@@ -942,9 +984,12 @@ fn run_realtime(
         return Ok(());
     }
     if rt.provider == "volcengine" {
-        let source = crate::palabra::lang_code(&rt.source_lang).to_string();
-        let target = crate::palabra::lang_code(&rt.target_lang).to_string();
-        let (say_tx, say_rx) = std::sync::mpsc::channel::<String>();
+        let source = crate::palabra::lang_code_owned(&rt.source_lang);
+        let target = crate::palabra::lang_code_owned(&rt.target_lang);
+        if source == "auto" || target == "auto" {
+            eprintln!("[{label}] 注意：火山引擎使用语言 auto，若识别异常请在配置里指定明确语言");
+        }
+        let (say_tx, say_rx) = std::sync::mpsc::sync_channel::<String>(16);
         let (_volc_stream, volc_handle) = match sink::open_output(Some(&out_device)) {
             Ok(v) => v,
             Err(e) => {
@@ -1038,6 +1083,10 @@ fn run_realtime(
                     match r.event {
                         volc::EVENT_SESSION_FAILED => {
                             eprintln!("[{label}] volc: {}", r.message);
+                            if r.message.contains("401") || r.message.contains("403") {
+                                eprintln!("[{label}] 火山认证失败，停止重连");
+                                return Ok(());
+                            }
                             failed = true;
                         }
                         volc::EVENT_SOURCE_RESPONSE => {
@@ -1061,7 +1110,11 @@ fn run_realtime(
                                 dst_text = r.text.clone();
                                 println!("[{label}] 译文: {}", r.text.trim());
                                 log_transcript(label, &src_text, &r.text);
-                                let _ = say_tx.send(r.text.trim().to_string());
+                                if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                                    say_tx.try_send(r.text.trim().to_string())
+                                {
+                                    eprintln!("[{label}] TTS 队列已满，丢弃一句");
+                                }
                             }
                         }
                         _ => {}
@@ -1086,7 +1139,11 @@ fn run_realtime(
                 for r in session.poll() {
                     if r.event == volc::EVENT_TRANSLATION_END && !r.text.trim().is_empty() {
                         println!("[{label}] 译文: {}", r.text.trim());
-                        let _ = say_tx.send(r.text.trim().to_string());
+                        if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                        say_tx.try_send(r.text.trim().to_string())
+                    {
+                        eprintln!("[{label}] TTS 队列已满，丢弃一句");
+                    }
                     }
                 }
             }
@@ -1191,6 +1248,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     let duplex = cfg.audio.duplex && !speak_only && !listen_only;
     let _ = TRANSCRIPT.set(cfg.ui.transcript_path.clone());
     let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
+    recorder::set_limit(cfg.ui.record_max_mb);
     DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
     BARGE_IN.store(cfg.audio.barge_in, Ordering::SeqCst);
     let live_app_key = if live_volc {
@@ -1248,8 +1306,12 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         label: "对方",
         source: if cfg.audio.input == "mic" {
             capture::Source::Mic(Some(cfg.audio.mic_device.clone()))
-        } else {
+        } else if pid.is_some() {
             capture::Source::Loopback(pid)
+        } else if !cfg.audio.loopback_device.trim().is_empty() {
+            capture::Source::LoopbackDevice(cfg.audio.loopback_device.clone())
+        } else {
+            capture::Source::Loopback(None)
         },
         stt: if live_mode {
             stt::SttEngine::None
@@ -1397,6 +1459,18 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

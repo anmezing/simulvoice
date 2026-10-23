@@ -96,7 +96,13 @@ fn worker(
             &mut jitter,
         ) {
             Ok(()) => {}
-            Err(e) => eprintln!("[live] {e}"),
+            Err(e) => {
+                let msg = e.to_string();
+                eprintln!("[live] {msg}");
+                if msg.contains("FATAL") {
+                    return Ok(());
+                }
+            }
         }
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
@@ -120,7 +126,8 @@ fn gemini_once(
     let url = format!(
         "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={api_key}"
     );
-    let (mut ws, _) = connect(&url)?;
+    let (mut ws, _) = connect(&url)
+        .map_err(|e| anyhow!("WS: {}", crate::http::redact(&e.to_string())))?;
     if let MaybeTlsStream::Rustls(s) = ws.get_mut() {
         let _ = s.sock.set_read_timeout(Some(Duration::from_millis(30)));
     }
@@ -196,7 +203,12 @@ fn gemini_once(
             {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return Err(anyhow!("Gemini Live 连接错误: {e}")),
+            Err(e) => {
+                return Err(anyhow!(
+                    "Gemini Live 连接错误: {}",
+                    crate::http::redact(&e.to_string())
+                ))
+            }
         }
         if sink.empty() {
             crate::ducking::restore();
@@ -259,6 +271,8 @@ fn handle_server(
     }
     Ok(())
 }
+
+
 
 
 

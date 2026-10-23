@@ -1,8 +1,8 @@
-[Setup]
+﻿[Setup]
 AppId={{8F3B2E54-6C1D-4B7A-9E2F-3A5C7D1B4E60}
 AppName=SimulVoice
-AppVersion=0.14.1
-AppVerName=SimulVoice 0.14.1
+AppVersion=0.15.0
+AppVerName=SimulVoice 0.15.0
 AppPublisher=SimulVoice
 DefaultDirName={localappdata}\Programs\SimulVoice
 DefaultGroupName=SimulVoice
@@ -10,7 +10,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=dist
-OutputBaseFilename=SimulVoiceSetup-0.14.1
+OutputBaseFilename=SimulVoiceSetup-0.15.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -28,8 +28,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "dist\stage\simulvoice.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\stage\README.md"; DestDir: "{app}"
-Source: "dist\stage\simulvoice.toml"; DestDir: "{app}"
-Source: "dist\stage\simulvoice.data-dir"; DestDir: "{app}"
+Source: "dist\stage\simulvoice.toml"; DestDir: "{app}"; Flags: onlyifdoesntexist
+Source: "dist\stage\simulvoice.data-dir"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
 Name: "{group}\SimulVoice"; Filename: "{app}\simulvoice.exe"
@@ -38,11 +38,4 @@ Name: "{autodesktop}\SimulVoice"; Filename: "{app}\simulvoice.exe"; Tasks: deskt
 
 [Run]
 Filename: "{app}\simulvoice.exe"; Description: "{cm:LaunchProgram,SimulVoice}"; Flags: nowait postinstall skipifsilent
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{app}\data"
-Type: files; Name: "{app}\simulvoice.data-dir"
-
-
-
 

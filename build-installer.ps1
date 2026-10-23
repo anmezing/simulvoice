@@ -26,7 +26,8 @@ Set-Content -Path "$stage\simulvoice.data-dir" -Value "data" -Encoding ascii -No
 
 & $Iscc "simulvoice.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-Write-Host "Installer: dist\SimulVoiceSetup-0.14.1.exe"
+Write-Host "Installer: dist\SimulVoiceSetup-0.15.0.exe"
+
 
 
 

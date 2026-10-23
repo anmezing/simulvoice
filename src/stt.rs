@@ -142,7 +142,13 @@ fn soniox_worker(
         }
         match soniox_once(&api_key, &language, &audio_rx, &text_tx, &partial) {
             Ok(()) => {}
-            Err(e) => eprintln!("[soniox] {e}"),
+            Err(e) => {
+                let msg = e.to_string();
+                eprintln!("[soniox] {msg}");
+                if msg.contains("FATAL") {
+                    return Ok(());
+                }
+            }
         }
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
@@ -197,7 +203,8 @@ fn soniox_once(
                     Err(_) => continue,
                 };
                 if let Some(err) = v.get("error_code").and_then(|e| e.as_str()) {
-                    return Err(anyhow!("soniox error: {err}"));
+                    let fatal = err.starts_with("401") || err.starts_with("403");
+                    return Err(anyhow!("{}soniox error: {err}", if fatal { "FATAL: " } else { "" }));
                 }
                 if let Some(tokens) = v.get("tokens").and_then(|t| t.as_array()) {
                     let mut partial_now = String::new();
@@ -513,6 +520,7 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
 fn _b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
 
 
 

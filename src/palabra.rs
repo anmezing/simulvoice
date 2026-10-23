@@ -22,6 +22,28 @@ pub fn lang_code(name: &str) -> &'static str {
     }
 }
 
+/// Language code for the wire protocol; "auto" stays "auto" instead of defaulting to English.
+pub fn lang_code_owned(name: &str) -> String {
+    let n = name.trim();
+    if n.is_empty() || n.eq_ignore_ascii_case("auto") {
+        return "auto".to_string();
+    }
+    match n.to_ascii_lowercase().as_str() {
+        "english" | "en" => "en".into(),
+        "chinese" | "zh" | "中文" => "zh".into(),
+        "japanese" | "ja" => "ja".into(),
+        "korean" | "ko" => "ko".into(),
+        "russian" | "ru" => "ru".into(),
+        "french" | "fr" => "fr".into(),
+        "german" | "de" => "de".into(),
+        "spanish" | "es" => "es".into(),
+        "portuguese" | "pt" => "pt".into(),
+        "italian" | "it" => "it".into(),
+        other if other.len() <= 5 => other.to_string(),
+        _ => "en".to_string(),
+    }
+}
+
 pub struct PalabraConfig {
     pub api_key: String,
     pub source: String,
@@ -45,13 +67,13 @@ fn set_task(cfg: &PalabraConfig) -> Value {
             },
             "pipeline": {
                 "transcription": {
-                    "source_language": lang_code(&cfg.source),
+                    "source_language": lang_code_owned(&cfg.source),
                     "detectable_languages": [],
                     "segment_confirmation_silence_threshold": 0.7,
                     "sentence_splitter": { "enabled": true }
                 },
                 "translations": [{
-                    "target_language": lang_code(&cfg.target),
+                    "target_language": lang_code_owned(&cfg.target),
                     "translate_partial_transcriptions": true,
                     "speech_generation": {
                         "voice_cloning": false,
@@ -107,7 +129,8 @@ impl PalabraSession {
             "wss://streaming.palabra.ai/streaming-api/{id}/v1/speech-to-speech/stream?token={}",
             urlencoding(&cfg.api_key)
         );
-        let (mut ws, _) = connect(&url)?;
+        let (mut ws, _) = connect(&url)
+        .map_err(|e| anyhow!("WS: {}", crate::http::redact(&e.to_string())))?;
         if let MaybeTlsStream::Rustls(s) = ws.get_mut() {
             let _ = s.sock.set_read_timeout(Some(Duration::from_millis(30)));
         }
@@ -272,6 +295,8 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
+
 
 
 

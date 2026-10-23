@@ -12,6 +12,8 @@ use crate::dsp::{downmix, Agc, StreamResampler};
 pub enum Source {
     /// Capture everything rendered by the system (optionally one process tree).
     Loopback(Option<u32>),
+    /// Capture a named render device (loopback).
+    LoopbackDevice(String),
     /// Capture a microphone / capture device by name (empty = default).
     Mic(Option<String>),
 }
@@ -86,10 +88,13 @@ fn run_capture(
             Some(p) => AudioClient::new_application_loopback_client(*p, true)?,
             None => get_default_device(&Direction::Render)?.get_iaudioclient()?,
         },
+        Source::LoopbackDevice(name) => {
+            find_device(&Direction::Render, name)?.get_iaudioclient()?
+        }
         Source::Mic(name) => match name {
-            Some(n) if !n.trim().is_empty() => wasapi::DeviceCollection::new(&Direction::Capture)?
-                .get_device_with_name(n)?
-                .get_iaudioclient()?,
+            Some(n) if !n.trim().is_empty() => {
+                find_device(&Direction::Capture, n)?.get_iaudioclient()?
+            }
             _ => get_default_device(&Direction::Capture)?.get_iaudioclient()?,
         },
     };
@@ -236,6 +241,21 @@ fn run_capture(
     Ok(())
 }
 
+fn find_device(direction: &Direction, needle: &str) -> Result<wasapi::Device> {
+    let collection = wasapi::DeviceCollection::new(direction)?;
+    let count = collection.get_nbr_devices()?;
+    let needle = needle.to_lowercase();
+    for i in 0..count {
+        let device = collection.get_device_at_index(i)?;
+        if let Ok(name) = device.get_friendlyname() {
+            if name.to_lowercase().contains(&needle) {
+                return Ok(device);
+            }
+        }
+    }
+    Err(anyhow!("找不到设备包含 '{}'（用 simulvoice devices 查看）", needle))
+}
+
 pub fn rms(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -243,5 +263,7 @@ pub fn rms(samples: &[i16]) -> f64 {
     let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
     (sum / samples.len() as f64).sqrt()
 }
+
+
 
 

@@ -20,17 +20,20 @@ fn legacy_dir() -> PathBuf {
     }
 }
 
-/// Picks a large-data location: first non-C fixed drive, else beside the exe.
+/// Portable default: data folder beside the executable.
 fn choose_default() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let portable = dir.join("data");
+            if std::fs::create_dir_all(&portable).is_ok() {
+                return portable;
+            }
+        }
+    }
     for letter in b'D'..=b'Z' {
         let root = format!("{}:\\", letter as char);
         if Path::new(&root).exists() {
             return PathBuf::from(root).join("SimulVoiceData");
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return dir.join("SimulVoiceData");
         }
     }
     legacy_dir()
@@ -88,7 +91,17 @@ pub fn ensure_layout() {
     let marker = marker_path();
     if !marker.exists() {
         let _ = std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")));
-        let _ = std::fs::write(&marker, dir.display().to_string());
+        let relative = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("data")))
+            .map(|p| p == dir)
+            .unwrap_or(false);
+        let value = if relative {
+            "data".to_string()
+        } else {
+            dir.display().to_string()
+        };
+        let _ = std::fs::write(&marker, value);
     }
     let cfg = default_config_path();
     if !cfg.exists() {
@@ -159,4 +172,5 @@ pub fn move_data(old: &Path, new: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
 

@@ -65,8 +65,8 @@ simulvoice run              # 使用数据目录里的 simulvoice.toml
 ## 数据目录
 
 - **安装版**：默认 `<安装目录>\data`，与安装位置一致
-- **便携版**（无安装标记）：自动选择第一个非 C 盘（如 `D:\SimulVoiceData`），否则放在 exe 旁边
-- 查看/修改：`simulvoice data-dir`、`simulvoice data-dir E:\SimulVoiceData --move`，或设置面板
+- **便携版**：默认 `<exe 所在目录>\data`，标记为相对路径，整体搬动目录后数据仍跟随
+- 查看/修改：`simulvoice data-dir`、`simulvoice data-dir E:\SimulVoiceData --move`，或在设置面板里点击「更改数据目录…」（立即生效）
 - 环境变量 `SIMULVOICE_DATA_DIR` 优先级最高
 - 模型、密钥、配置、录音都在该目录
 
@@ -164,6 +164,7 @@ WASAPI / 进程回环 / 麦克风
 ## License
 
 MIT
+
 
 
 

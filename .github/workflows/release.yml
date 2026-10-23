@@ -15,10 +15,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build package
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build packages
         shell: pwsh
         run: ./package.ps1
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/SimulVoiceSetup-*.exe

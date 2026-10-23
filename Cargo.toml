@@ -1,6 +1,6 @@
 [package]
 name = "simulvoice"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 
 [dependencies]
@@ -38,6 +38,7 @@ fs2 = "0.4"
 lto = "thin"
 strip = true
 codegen-units = 1
+
 
 
 

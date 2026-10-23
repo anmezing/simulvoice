@@ -30,21 +30,25 @@ cargo build --release
 
 ## 快速开始
 
+双击 `simulvoice.exe`（不带参数）会直接打开设置面板：选场景预设、填密钥、下载模型、保存即可。
+
+命令行等价：
+
 ```powershell
-# 生成配置
-simulvoice config-init simulvoice.toml
-
-# 自检（设备、密钥、模型、路由）
-simulvoice doctor --config simulvoice.toml
-
-# 场景预设
-simulvoice preset teams      # 双向同传（Teams / Zoom）
-simulvoice preset game       # 游戏听译（只显示字幕）
-simulvoice preset record     # 会议记录（字幕 + 转写文件）
-
-# 运行
-simulvoice run --config simulvoice.toml
+simulvoice settings         # 图形化设置（预设 / 密钥 / 模型下载 / 数据目录）
+simulvoice preset teams     # 双向同传（Teams / Zoom）
+simulvoice preset game      # 游戏听译（只显示字幕）
+simulvoice preset record    # 会议记录（字幕 + 转写文件）
+simulvoice doctor           # 自检设备/密钥/模型/路由
+simulvoice run              # 使用数据目录里的 simulvoice.toml
 ```
+
+## 数据目录（模型不占 C 盘）
+
+- 默认自动选择第一个非 C 盘（如 `D:\SimulVoiceData`），没有则放在 exe 旁边
+- 可用 `simulvoice data-dir` 查看，`simulvoice data-dir E:\SimulVoiceData --move` 修改并迁移
+- 也可用环境变量 `SIMULVOICE_DATA_DIR` 指定
+- 模型、密钥、配置、录音都在该目录；设置面板可一键更改
 
 ## 三种组合
 
@@ -140,4 +144,5 @@ WASAPI / 进程回环 / 麦克风
 ## License
 
 MIT
+
 

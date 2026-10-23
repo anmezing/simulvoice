@@ -3,6 +3,7 @@ use std::path::PathBuf;
 /// Loads local API keys into the environment without logging their values.
 pub fn load_env() {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(crate::paths::keys_path());
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("keys.toml"));
@@ -175,6 +176,7 @@ pub fn roundtrip_test() -> bool {
 pub fn roundtrip_test() -> bool {
     true
 }
+
 
 
 

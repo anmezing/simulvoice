@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,6 +9,8 @@ pub struct SubtitleState {
     pub in_dst: String,
     pub out_src: String,
     pub out_dst: String,
+    pub in_extras: Vec<(String, String)>,
+    pub out_extras: Vec<(String, String)>,
     pub version: u64,
 }
 
@@ -22,6 +25,18 @@ impl SubtitleState {
             self.version += 1;
         }
     }
+    pub fn set_extras(&mut self, outbound: bool, extras: Vec<(String, String)>) {
+        if outbound {
+            if self.out_extras != extras {
+                self.out_extras = extras;
+                self.version += 1;
+            }
+        } else if self.in_extras != extras {
+            self.in_extras = extras;
+            self.version += 1;
+        }
+    }
+
     pub fn set_out(&mut self, src: String, dst: String) {
         if !src.is_empty() && self.out_src != src {
             self.out_src = src;
@@ -130,6 +145,13 @@ impl eframe::App for SubtitleApp {
                             .strong()
                             .color(egui::Color32::WHITE),
                     );
+                    for (lang, text) in &s.in_extras {
+                        ui.label(
+                            egui::RichText::new(format!("[{lang}] {text}"))
+                                .size(19.0)
+                                .color(egui::Color32::from_gray(190)),
+                        );
+                    }
                     ui.add_space(8.0);
                 }
                 if !s.out_src.is_empty() || !s.out_dst.is_empty() {
@@ -144,14 +166,22 @@ impl eframe::App for SubtitleApp {
                             .strong()
                             .color(egui::Color32::from_rgb(170, 220, 255)),
                     );
+                    for (lang, text) in &s.out_extras {
+                        ui.label(
+                            egui::RichText::new(format!("[{lang}] {text}"))
+                                .size(19.0)
+                                .color(egui::Color32::from_gray(190)),
+                        );
+                    }
                 }
             });
     }
 }
 
 pub fn run_settings(cfg: crate::config::Config, path: String) -> anyhow::Result<()> {
+    let extra_text = cfg.translate.extra_targets.join(", ");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 640.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([620.0, 820.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -163,6 +193,9 @@ pub fn run_settings(cfg: crate::config::Config, path: String) -> anyhow::Result<
                 cfg,
                 path,
                 status: String::new(),
+                busy: Arc::new(AtomicBool::new(false)),
+                model_status: Arc::new(Mutex::new(String::new())),
+                extra_text,
             }))
         }),
     )
@@ -173,6 +206,9 @@ struct SettingsApp {
     cfg: crate::config::Config,
     path: String,
     status: String,
+    busy: Arc<AtomicBool>,
+    model_status: Arc<Mutex<String>>,
+    extra_text: String,
 }
 
 fn pick_folder() -> Option<String> {
@@ -230,6 +266,9 @@ impl eframe::App for SettingsApp {
                     ui.label("自定义端点");
                     ui.text_edit_singleline(&mut self.cfg.translate.endpoint);
                     ui.end_row();
+                    ui.label("额外字幕语言");
+                    ui.text_edit_singleline(&mut self.extra_text);
+                    ui.end_row();
                     ui.label("TTS 引擎");
                     combo(ui, "tts", &mut self.cfg.tts.provider, &["edge", "sapi", "sherpa", "openai", "none"]);
                     ui.end_row();
@@ -259,9 +298,102 @@ impl eframe::App for SettingsApp {
             ui.checkbox(&mut self.cfg.audio.duplex, "双向同传");
             ui.checkbox(&mut self.cfg.dsp.denoise, "RNNoise 降噪");
             ui.checkbox(&mut self.cfg.ui.subtitles, "双语字幕悬浮窗");
+            ui.add_space(6.0);
+            ui.label("快速预设");
+            ui.horizontal(|ui| {
+                for (id, label) in [
+                    ("teams", "Teams 双向"),
+                    ("game", "游戏听译"),
+                    ("record", "会议记录"),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.status = match crate::config::apply_preset(&mut self.cfg, id) {
+                            Ok(_) => {
+                                self.extra_text = self.cfg.translate.extra_targets.join(", ");
+                                format!("已应用预设: {id}")
+                            }
+                            Err(e) => format!("预设失败: {e}"),
+                        };
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.label("本地模型（下载到数据目录）");
+            let busy = self.busy.clone();
+            let status = self.model_status.clone();
+            let downloading = busy.load(Ordering::Relaxed);
+            ui.horizontal(|ui| {
+                let mut mk = |id: &'static str, label: &str| {
+                    if ui
+                        .add_enabled(!downloading, egui::Button::new(label))
+                        .clicked()
+                        && !busy.swap(true, Ordering::SeqCst)
+                    {
+                        *status.lock().unwrap() = format!("下载中: {id}");
+                        let b = busy.clone();
+                        let s = status.clone();
+                        std::thread::spawn(move || {
+                            let r = match id {
+                                "vosk" => crate::models::download_vosk("cn"),
+                                "silero" => crate::models::download_silero(),
+                                "piper" => crate::models::download_piper("zh"),
+                                _ => Ok(()),
+                            };
+                            *s.lock().unwrap() = match r {
+                                Ok(_) => "下载完成".to_string(),
+                                Err(e) => format!("下载失败: {e}"),
+                            };
+                            b.store(false, Ordering::SeqCst);
+                        });
+                    }
+                };
+                mk("vosk", "Vosk 中文");
+                mk("silero", "Silero VAD");
+                mk("piper", "Piper 中文");
+            });
+            ui.horizontal(|ui| {
+                if ui.button("更改数据目录…").clicked() {
+                    if let Some(dir) = pick_folder() {
+                        self.status = match crate::paths::set_data_dir(&dir) {
+                            Ok(_) => {
+                                crate::paths::ensure_layout();
+                                self.path =
+                                    crate::paths::default_config_path().display().to_string();
+                                format!(
+                                    "数据目录已切换到 {dir}（已生效，模型需重新下载或手动迁移）"
+                                )
+                            }
+                            Err(e) => format!("设置失败: {e}"),
+                        };
+                    }
+                }
+                if ui.button("打开数据目录").clicked() {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(crate::paths::data_dir())
+                        .spawn();
+                }
+            });
+            ui.label(format!(
+                "数据目录: {}",
+                crate::paths::data_dir().display()
+            ));
+            ui.label(format!("配置: {}", self.path));
+            let ms = self.model_status.lock().unwrap().clone();
+            if !ms.is_empty() {
+                ui.label(ms);
+            }
+            if downloading {
+                ctx.request_repaint_after(Duration::from_millis(300));
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("保存").clicked() {
+                    self.cfg.translate.extra_targets = self
+                        .extra_text
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     self.status = match self.cfg.save(&self.path) {
                         Ok(_) => format!("已保存: {}", self.path),
                         Err(e) => format!("保存失败: {e}"),
@@ -276,6 +408,10 @@ impl eframe::App for SettingsApp {
         });
     }
 }
+
+
+
+
 
 
 

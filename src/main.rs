@@ -1,6 +1,7 @@
 mod capture;
 mod config;
 mod dsp;
+mod ducking;
 mod edge_tts;
 mod gemini_live;
 mod hotkeys;
@@ -31,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 
 pub static STOP: AtomicBool = AtomicBool::new(false);
+pub static DUCK: AtomicBool = AtomicBool::new(true);
 static TRANSCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn log_transcript(side: &str, src: &str, dst: &str) {
@@ -125,7 +127,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.11.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.12.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -240,6 +242,7 @@ fn main() -> Result<()> {
         Some("ttstest") => {
             let cfg = Config::load(flag(&args, "--config").as_deref())?;
             let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
+    DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
             let text = args.get(1).cloned().unwrap_or_else(|| "这是一次较长的语音合成测试，用来验证分句与流式播放。".into());
             let mut edge = None;
             let mut cache = std::collections::HashMap::new();
@@ -726,6 +729,27 @@ fn build_extras(cfg: &Config) -> Vec<(String, Box<dyn translate::Translator>)> {
     out
 }
 
+struct DuckGuard {
+    active: bool,
+}
+
+impl DuckGuard {
+    fn new(active: bool) -> Self {
+        if active {
+            crate::ducking::duck();
+        }
+        Self { active }
+    }
+}
+
+impl Drop for DuckGuard {
+    fn drop(&mut self) {
+        if self.active {
+            crate::ducking::restore();
+        }
+    }
+}
+
 fn speak_text(
     cfg: &config::TtsConfig,
     sherpa: Option<&tts::SherpaTts>,
@@ -737,6 +761,7 @@ fn speak_text(
     if hotkeys::MUTE_TTS.load(Ordering::SeqCst) {
         return Ok(());
     }
+    let _duck = DuckGuard::new(cfg.provider != "none" && DUCK.load(Ordering::SeqCst));
     match cfg.provider.as_str() {
         "none" => Ok(()),
         "sapi" => tts::speak_sapi(text, Some(&cfg.voice)),
@@ -1159,6 +1184,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     let duplex = cfg.audio.duplex && !speak_only && !listen_only;
     let _ = TRANSCRIPT.set(cfg.ui.transcript_path.clone());
     let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
+    DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
     let live_app_key = if live_volc {
         Some(std::env::var("VOLC_APP_ID").map_err(|_| anyhow!("VOLC_APP_ID 未设置"))?)
     } else {
@@ -1363,6 +1389,9 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
 
 
 

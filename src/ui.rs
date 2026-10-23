@@ -297,6 +297,7 @@ impl eframe::App for SettingsApp {
             ui.add_space(6.0);
             ui.checkbox(&mut self.cfg.audio.duplex, "双向同传");
             ui.checkbox(&mut self.cfg.dsp.denoise, "RNNoise 降噪");
+            ui.checkbox(&mut self.cfg.dsp.duck, "朗读时压低其他应用音量");
             ui.checkbox(&mut self.cfg.ui.subtitles, "双语字幕悬浮窗");
             ui.add_space(6.0);
             ui.label("快速预设");
@@ -408,6 +409,7 @@ impl eframe::App for SettingsApp {
         });
     }
 }
+
 
 
 

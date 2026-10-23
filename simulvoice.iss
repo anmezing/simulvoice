@@ -1,8 +1,8 @@
 [Setup]
 AppId={{8F3B2E54-6C1D-4B7A-9E2F-3A5C7D1B4E60}
 AppName=SimulVoice
-AppVersion=0.13.1
-AppVerName=SimulVoice 0.13.1
+AppVersion=0.14.0
+AppVerName=SimulVoice 0.14.0
 AppPublisher=SimulVoice
 DefaultDirName={localappdata}\Programs\SimulVoice
 DefaultGroupName=SimulVoice
@@ -10,7 +10,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=dist
-OutputBaseFilename=SimulVoiceSetup-0.13.1
+OutputBaseFilename=SimulVoiceSetup-0.14.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -42,5 +42,6 @@ Filename: "{app}\simulvoice.exe"; Description: "{cm:LaunchProgram,SimulVoice}"; 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\data"
 Type: files; Name: "{app}\simulvoice.data-dir"
+
 
 

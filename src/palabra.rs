@@ -128,6 +128,12 @@ impl PalabraSession {
     }
 
     pub fn send_audio(&mut self, pcm: &[i16]) -> Result<()> {
+        if let Some(sink) = &self.sink {
+            if rms_i16(pcm) > 1000.0 && !sink.empty() {
+                sink.stop();
+                sink.play();
+            }
+        }
         self.ws.send(audio_msg(pcm))?;
         Ok(())
     }
@@ -164,6 +170,11 @@ impl PalabraSession {
                     out.push(PalabraEvent::Error(e.to_string()));
                     break;
                 }
+            }
+        }
+        if let Some(sink) = &self.sink {
+            if sink.empty() {
+                crate::ducking::restore();
             }
         }
         out
@@ -203,6 +214,7 @@ impl PalabraSession {
                             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
                             .collect();
                         if let Some(sink) = &self.sink {
+                            crate::ducking::duck();
                             self.jitter.push(sink, &samples);
                         }
                         out.push(PalabraEvent::Audio);
@@ -231,6 +243,14 @@ pub enum PalabraEvent {
     Closed,
 }
 
+fn rms_i16(samples: &[i16]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum / samples.len() as f64).sqrt()
+}
+
 fn urlencoding(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -243,6 +263,8 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
+
 
 
 

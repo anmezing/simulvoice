@@ -46,7 +46,7 @@ if (-not $NoRegistry) {
     $key = Join-Path $root "SimulVoice"
     New-Item -Path $key -Force | Out-Null
     Set-ItemProperty -Path $key -Name DisplayName -Value "SimulVoice"
-    Set-ItemProperty -Path $key -Name DisplayVersion -Value "0.10.2"
+    Set-ItemProperty -Path $key -Name DisplayVersion -Value "0.11.0"
     Set-ItemProperty -Path $key -Name InstallLocation -Value $InstallDir
     Set-ItemProperty -Path $key -Name DisplayIcon -Value (Join-Path $InstallDir "simulvoice.exe")
     $uninstallCmd = 'powershell -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $InstallDir 'uninstall.ps1')
@@ -58,5 +58,6 @@ if (-not $NoRegistry) {
 Write-Host "Installed to: $InstallDir"
 Write-Host "Data directory: $DataDir"
 if (-not $NoShortcut) { Write-Host "Start menu shortcut created" }
+
 
 

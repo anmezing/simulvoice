@@ -44,6 +44,8 @@ pub struct TranslateConfig {
     pub api_key_env: String,
     /// 术语表（每行「原文=译文」或自由描述）
     pub glossary: String,
+    /// 额外字幕语言（仅字幕，不朗读）
+    pub extra_targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -147,6 +149,7 @@ impl Default for TranslateConfig {
             endpoint: "http://127.0.0.1:11434".into(),
             api_key_env: "OPENAI_API_KEY".into(),
             glossary: String::new(),
+            extra_targets: Vec::new(),
         }
     }
 }
@@ -290,6 +293,7 @@ model = "qwen2.5:3b"
 endpoint = "http://127.0.0.1:11434"   # ollama / custom 的地址
 api_key_env = "OPENAI_API_KEY"
 glossary = ""                  # 术语表，每行「原文=译文」
+extra_targets = []             # 额外字幕语言，如 ["English","Japanese"]（不朗读）
 
 [tts]
 # edge(在线免费) | sapi(本地 Windows 语音) | openai(在线) | none
@@ -386,4 +390,6 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+
 

@@ -125,7 +125,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.10.2 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.11.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -224,6 +224,19 @@ fn main() -> Result<()> {
         },
         Some("vadcheck") => vad_check(&args),
         Some("livetest") => livetest::run(&args),
+        Some("multitest") => {
+            let cfg = Config::load(flag(&args, "--config").as_deref())?;
+            let text = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "今天天气很好".into());
+            let mut primary = translate::build(&cfg.translate)?;
+            println!("[primary] {}", primary.translate(&text)?);
+            for (lang, mut extra) in build_extras(&cfg) {
+                println!("[{lang}] {}", extra.translate(&text)?);
+            }
+            Ok(())
+        }
         Some("ttstest") => {
             let cfg = Config::load(flag(&args, "--config").as_deref())?;
             let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
@@ -504,6 +517,7 @@ struct Pipe {
     source: capture::Source,
     stt: stt::SttEngine,
     translator: Box<dyn translate::Translator>,
+    extras: Vec<(String, Box<dyn translate::Translator>)>,
     realtime: Option<RealtimePipe>,
     tts: config::TtsConfig,
     out_device: String,
@@ -580,6 +594,21 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
             };
             println!("[{}] 译文: {translated}", p.label);
             log_transcript(p.label, &text, &translated);
+            let mut extra_out = Vec::new();
+            for (lang, tr) in p.extras.iter_mut() {
+                match tr.translate(&text) {
+                    Ok(t) => {
+                        println!("[{}] 额外({lang}): {t}", p.label);
+                        extra_out.push((lang.clone(), t));
+                    }
+                    Err(e) => eprintln!("[{}] 额外翻译失败({lang}): {e}", p.label),
+                }
+            }
+            if let Some(s) = &p.subs {
+                if let Ok(mut g) = s.lock() {
+                    g.set_extras(p.outbound, extra_out);
+                }
+            }
             if let Some(s) = &p.subs {
                 if let Ok(mut g) = s.lock() {
                     if p.outbound { g.set_out(String::new(), translated.clone()) } else { g.set_in(String::new(), translated.clone()) }
@@ -678,6 +707,23 @@ fn interpreter_instruction(target: &str, glossary: &str) -> String {
          Speak only the translation, naturally, concisely and fluently. \
          Do not add commentary, never repeat the original language.{terms}"
     )
+}
+
+fn build_extras(cfg: &Config) -> Vec<(String, Box<dyn translate::Translator>)> {
+    let mut out = Vec::new();
+    for target in &cfg.translate.extra_targets {
+        let target = target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        let mut c = cfg.translate.clone();
+        c.target = target.to_string();
+        match translate::build(&c) {
+            Ok(tr) => out.push((target.to_string(), tr)),
+            Err(e) => eprintln!("[extras] {target}: {e}"),
+        }
+    }
+    out
 }
 
 fn speak_text(
@@ -1181,6 +1227,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         } else {
             translate::build(&cfg.translate)?
         },
+        extras: if live_mode { Vec::new() } else { build_extras(&cfg) },
         realtime: if live_mode {
             Some(RealtimePipe {
                 provider: cfg.realtime.provider.clone(),
@@ -1255,6 +1302,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         } else {
             translate::build(&out_tr_cfg)?
         },
+        extras: if live_mode { Vec::new() } else { build_extras(&cfg) },
         realtime: if live_mode {
             Some(RealtimePipe {
                 provider: cfg.realtime.provider.clone(),
@@ -1315,6 +1363,11 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
+
+
 
 
 

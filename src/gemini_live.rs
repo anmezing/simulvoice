@@ -146,6 +146,10 @@ fn gemini_once(
             let _ = ws.send(Message::Text(msg.to_string().into()));
         }
         while let Ok(chunk) = audio_rx.try_recv() {
+            if rms_i16(&chunk) > 1000.0 && !sink.empty() {
+                sink.stop();
+                sink.play();
+            }
             let mut bytes = Vec::with_capacity(chunk.len() * 2);
             for s in chunk {
                 bytes.extend_from_slice(&s.to_le_bytes());
@@ -183,8 +187,19 @@ fn gemini_once(
             }
             Err(e) => return Err(anyhow!("Gemini Live 连接错误: {e}")),
         }
+        if sink.empty() {
+            crate::ducking::restore();
+        }
     }
 }
+fn rms_i16(samples: &[i16]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum / samples.len() as f64).sqrt()
+}
+
 fn handle_server(
     text: &str,
     sink: &rodio::Sink,
@@ -222,6 +237,7 @@ fn handle_server(
                             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
                             .collect();
                         if !samples.is_empty() {
+                            crate::ducking::duck();
                             jitter.push(sink, &samples);
                             let _ = ev.send(LiveEvent::Audio);
                         }
@@ -232,6 +248,8 @@ fn handle_server(
     }
     Ok(())
 }
+
+
 
 
 

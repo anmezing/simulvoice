@@ -146,12 +146,13 @@ WASAPI / 进程回环 / 麦克风
 
 - 仅 Windows（macOS 需要 CoreAudio/BlackHole 移植）
 - 热键静音只影响经典链路与火山 TTS；Gemini/Palabra 自带音频播放不受 F9 控制
-- Barge-in 与 TTS ducking 仅在经典链路/火山 TTS 生效；额外字幕语言也只作用于经典链路（实时引擎固定单目标）
+- Barge-in 与 TTS ducking 已覆盖经典链路及 Gemini/Palabra/火山；额外字幕语言仍只作用于经典链路（实时引擎固定单目标）
 - 未实现：按前台进程切换配置、模型量化/DirectML、代码签名
 
 ## License
 
 MIT
+
 
 
 

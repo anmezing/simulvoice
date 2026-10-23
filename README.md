@@ -28,6 +28,25 @@ cargo build --release
 .\package.ps1   # dist\simulvoice-<version>.zip
 ```
 
+## 安装（可选）
+
+便携版可直接运行 exe；需要快捷方式/卸载入口时用安装脚本：
+
+```powershell
+# 默认安装到 C:\Users\<你>\AppData\Local\Programs\SimulVoice（无需管理员）
+.\install.ps1
+
+# 自定义安装位置，数据自动跟随安装目录
+.\install.ps1 -InstallDir D:\Apps\SimulVoice
+
+# 所有用户安装（管理员）
+.\install.ps1 -Machine
+```
+
+- 数据默认在 `<安装目录>\data`，随安装位置变化
+- 卸载：Windows 设置 → 应用，或运行 `<安装目录>\uninstall.ps1`（`-KeepData` 保留数据）
+- 便携模式仍可用 `simulvoice data-dir` 把数据放到任意磁盘
+
 ## 快速开始
 
 双击 `simulvoice.exe`（不带参数）会直接打开设置面板：选场景预设、填密钥、下载模型、保存即可。
@@ -43,12 +62,13 @@ simulvoice doctor           # 自检设备/密钥/模型/路由
 simulvoice run              # 使用数据目录里的 simulvoice.toml
 ```
 
-## 数据目录（模型不占 C 盘）
+## 数据目录
 
-- 默认自动选择第一个非 C 盘（如 `D:\SimulVoiceData`），没有则放在 exe 旁边
-- 可用 `simulvoice data-dir` 查看，`simulvoice data-dir E:\SimulVoiceData --move` 修改并迁移
-- 也可用环境变量 `SIMULVOICE_DATA_DIR` 指定
-- 模型、密钥、配置、录音都在该目录；设置面板可一键更改
+- **安装版**：默认 `<安装目录>\data`，与安装位置一致
+- **便携版**（无安装标记）：自动选择第一个非 C 盘（如 `D:\SimulVoiceData`），否则放在 exe 旁边
+- 查看/修改：`simulvoice data-dir`、`simulvoice data-dir E:\SimulVoiceData --move`，或设置面板
+- 环境变量 `SIMULVOICE_DATA_DIR` 优先级最高
+- 模型、密钥、配置、录音都在该目录
 
 ## 三种组合
 
@@ -144,5 +164,6 @@ WASAPI / 进程回环 / 麦克风
 ## License
 
 MIT
+
 
 

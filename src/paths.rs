@@ -45,7 +45,16 @@ pub fn data_dir() -> PathBuf {
     if let Ok(text) = std::fs::read_to_string(marker_path()) {
         let p = text.trim();
         if !p.is_empty() {
-            return PathBuf::from(p);
+            let pb = PathBuf::from(p);
+            if pb.is_absolute() {
+                return pb;
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    return dir.join(pb);
+                }
+            }
+            return pb;
         }
     }
     choose_default()
@@ -150,3 +159,4 @@ pub fn move_data(old: &Path, new: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
+

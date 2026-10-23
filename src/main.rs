@@ -127,7 +127,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.13.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.13.1 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -1389,6 +1389,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
 
 
 

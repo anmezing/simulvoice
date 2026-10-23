@@ -30,7 +30,7 @@ cargo build --release
 
 ## 安装
 
-- **安装版**：运行 `SimulVoiceSetup-*.exe`，默认安装到 `C:\Users\<你>\AppData\Local\Programs\SimulVoice`，可修改安装位置
+- **安装版**：运行 `SimulVoiceSetup-*.exe`（安装向导支持中文/英文），默认安装到 `C:\Users\<你>\AppData\Local\Programs\SimulVoice`，可修改安装位置
   - 自动创建开始菜单快捷方式（可选桌面快捷方式）
   - 卸载：Windows 设置 → 应用 → SimulVoice，或开始菜单里的「Uninstall SimulVoice」
   - 数据默认在 `<安装目录>\data`，随安装位置变化；卸载时一并删除
@@ -152,6 +152,7 @@ WASAPI / 进程回环 / 麦克风
 ## License
 
 MIT
+
 
 
 

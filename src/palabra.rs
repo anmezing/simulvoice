@@ -129,7 +129,10 @@ impl PalabraSession {
 
     pub fn send_audio(&mut self, pcm: &[i16]) -> Result<()> {
         if let Some(sink) = &self.sink {
-            if rms_i16(pcm) > 1000.0 && !sink.empty() {
+            if crate::BARGE_IN.load(std::sync::atomic::Ordering::SeqCst)
+                && rms_i16(pcm) > 1000.0
+                && !sink.empty()
+            {
                 sink.stop();
                 sink.play();
             }
@@ -146,6 +149,12 @@ impl PalabraSession {
 
     /// Reads one batch of pending events without blocking.
     pub fn poll(&mut self) -> Vec<PalabraEvent> {
+        if let Some(sink) = &self.sink {
+            if crate::STOP_TTS.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                sink.stop();
+                sink.play();
+            }
+        }
         let mut out = Vec::new();
         loop {
             match self.ws.read() {
@@ -263,6 +272,7 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
 
 
 

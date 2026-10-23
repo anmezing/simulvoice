@@ -77,6 +77,8 @@ pub struct AudioConfig {
     pub remote_output_device: String,
     /// 双向同传：入向（对方→你）+ 出向（你→对方）
     pub duplex: bool,
+    /// 检测到语音时自动停止当前译文（实验性，默认关闭）
+    pub barge_in: bool,
     /// both | listen | speak
     pub mode: String,
     /// 静音阈值（i16 RMS），低于视为静音
@@ -179,6 +181,7 @@ impl Default for AudioConfig {
             mic_device: String::new(),
             remote_output_device: String::new(),
             duplex: false,
+            barge_in: false,
             mode: "both".into(),
             vad_rms: 250.0,
             silence_ms: 450,
@@ -315,6 +318,7 @@ mic_device = ""                # 你的麦克风（空=默认）
 remote_output_device = ""      # 对方听到的译文，如 "CABLE"
 duplex = false                 # true = 双向同传
 mode = "both"                  # both | listen | speak
+barge_in = false               # 自动打断（实验性，默认关闭）
 vad_rms = 250
 silence_ms = 450
 max_utterance_ms = 8000
@@ -394,6 +398,7 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
 
 
 

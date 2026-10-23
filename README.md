@@ -101,7 +101,7 @@ remote_output_device = "CABLE"  # 对方听到的译文（虚拟声卡）
 
 ## 热键 / 托盘
 
-- `Ctrl+Alt+F9`：静音/恢复译文朗读
+- `Ctrl+Alt+F8`：停止当前译文（手动打断）\n- `Ctrl+Alt+F9`：静音/恢复译文朗读
 - `Ctrl+Alt+F10`：停止
 - 托盘图标：双击静音，右键菜单「静音」「退出」
 
@@ -146,12 +146,13 @@ WASAPI / 进程回环 / 麦克风
 
 - 仅 Windows（macOS 需要 CoreAudio/BlackHole 移植）
 - 热键静音只影响经典链路与火山 TTS；Gemini/Palabra 自带音频播放不受 F9 控制
-- Barge-in 与 TTS ducking 已覆盖经典链路及 Gemini/Palabra/火山；额外字幕语言仍只作用于经典链路（实时引擎固定单目标）
+- 自动打断默认关闭（避免漏听对方译文），可在设置里开启或按 Ctrl+Alt+F8 手动停止；ducking 覆盖经典链路及 Gemini/Palabra/火山\n- 额外字幕语言仍只作用于经典链路（实时引擎固定单目标）
 - 未实现：按前台进程切换配置、模型量化/DirectML、代码签名
 
 ## License
 
 MIT
+
 
 
 

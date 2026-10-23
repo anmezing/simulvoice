@@ -33,6 +33,8 @@ use std::sync::mpsc::channel;
 
 pub static STOP: AtomicBool = AtomicBool::new(false);
 pub static DUCK: AtomicBool = AtomicBool::new(true);
+pub static BARGE_IN: AtomicBool = AtomicBool::new(false);
+pub static STOP_TTS: AtomicBool = AtomicBool::new(false);
 static TRANSCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn log_transcript(side: &str, src: &str, dst: &str) {
@@ -127,7 +129,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.14.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.14.1 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -242,7 +244,6 @@ fn main() -> Result<()> {
         Some("ttstest") => {
             let cfg = Config::load(flag(&args, "--config").as_deref())?;
             let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
-    DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
             let text = args.get(1).cloned().unwrap_or_else(|| "这是一次较长的语音合成测试，用来验证分句与流式播放。".into());
             let mut edge = None;
             let mut cache = std::collections::HashMap::new();
@@ -644,6 +645,10 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
     };
     let started = std::time::Instant::now();
     while !STOP.load(Ordering::SeqCst) {
+        if STOP_TTS.swap(false, Ordering::SeqCst) {
+            tts_sink.stop();
+            tts_sink.play();
+        }
         if let Some(secs) = p.seconds {
             if started.elapsed() >= Duration::from_secs(secs) {
                 eprintln!("[{}] 达到 {secs} 秒，退出", p.label);
@@ -664,8 +669,10 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
             match ev {
                 VadEvent::Start => {
                     p.stt.begin_utterance();
-                    tts_sink.stop();
-                    tts_sink.play();
+                    if BARGE_IN.load(Ordering::SeqCst) {
+                        tts_sink.stop();
+                        tts_sink.play();
+                    }
                 }
                 VadEvent::Feed(buf) => {
                     if let Err(e) = p.stt.feed(&buf) {
@@ -1185,6 +1192,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     let _ = TRANSCRIPT.set(cfg.ui.transcript_path.clone());
     let _ = recorder::RECORD_DIR.set(cfg.ui.record_dir.clone());
     DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
+    BARGE_IN.store(cfg.audio.barge_in, Ordering::SeqCst);
     let live_app_key = if live_volc {
         Some(std::env::var("VOLC_APP_ID").map_err(|_| anyhow!("VOLC_APP_ID 未设置"))?)
     } else {
@@ -1389,6 +1397,9 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
 
 
 

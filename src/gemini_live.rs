@@ -80,6 +80,10 @@ fn worker(
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
+        if crate::STOP_TTS.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            sink.stop();
+            sink.play();
+        }
         match gemini_once(
             &api_key,
             &model,
@@ -141,12 +145,19 @@ fn gemini_once(
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
+        if crate::STOP_TTS.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            sink.stop();
+            sink.play();
+        }
         if end_rx.try_recv().is_ok() {
             let msg = json!({"realtimeInput": {"activityEnd": {}}});
             let _ = ws.send(Message::Text(msg.to_string().into()));
         }
         while let Ok(chunk) = audio_rx.try_recv() {
-            if rms_i16(&chunk) > 1000.0 && !sink.empty() {
+            if crate::BARGE_IN.load(std::sync::atomic::Ordering::SeqCst)
+                && rms_i16(&chunk) > 1000.0
+                && !sink.empty()
+            {
                 sink.stop();
                 sink.play();
             }
@@ -248,6 +259,7 @@ fn handle_server(
     }
     Ok(())
 }
+
 
 
 

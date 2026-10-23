@@ -1,0 +1,51 @@
+[package]
+name = "simulvoice"
+version = "0.9.8"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+cpal = "0.15"
+rodio = "0.19"
+hound = "3"
+ureq = { version = "2", features = ["json", "tls"] }
+chrono = "0.4"
+wasapi = "0.19"
+libloading = "0.8"
+zip = "2"
+dirs = "5"
+nnnoiseless = "0.5"
+eframe = "0.29"
+sherpa-onnx = "1.12"
+tar = "0.4"
+bzip2 = "0.4"
+rubato = "0.15"
+ctrlc = "3"
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+fs2 = "0.4"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+
+
+
+
+
+
+
+
+
+
+
+

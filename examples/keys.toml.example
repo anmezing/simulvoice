@@ -1,0 +1,14 @@
+# Copy to keys.toml and fill in the credentials you use.
+[openai]
+api_key = ""
+
+[gemini]
+api_key = ""
+
+[palabra]
+api_key = ""
+
+[volcengine]
+app_id = ""
+access_token = ""
+resource_id = "volc.service_type.10053"

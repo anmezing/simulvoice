@@ -175,6 +175,18 @@ struct SettingsApp {
     status: String,
 }
 
+fn pick_folder() -> Option<String> {
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+                  $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+                  if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }";
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
     egui::ComboBox::from_id_salt(id)
         .selected_text(value.clone())
@@ -264,6 +276,7 @@ impl eframe::App for SettingsApp {
         });
     }
 }
+
 
 
 

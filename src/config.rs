@@ -232,19 +232,20 @@ impl Default for RealtimeConfig {
 pub const CONFIG_VERSION: u32 = 1;
 
 pub fn default_models_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("simulvoice")
-        .join("models")
+    crate::paths::models_dir()
 }
 
 impl Config {
     pub fn load(path: Option<&str>) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::default());
+        let path = match path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => crate::paths::default_config_path(),
         };
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("读取配置失败: {path}"))?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("读取配置失败: {}", path.display()))?;
         let mut cfg: Config = toml::from_str(&text)?;
         if cfg.version == 0 {
             cfg.version = CONFIG_VERSION;
@@ -269,7 +270,7 @@ impl Config {
 }
 
 pub const TEMPLATE: &str = r#"# simulvoice 配置
-version = 1：三个阶段可任意组合（本地 / 在线 / 混合）
+version = 1
 
 [stt]
 # soniox(在线流式) | openai(在线) | vosk(本地, 需先 models vosk) | none
@@ -344,4 +345,45 @@ output_device = ""
 
 
 
+
+
+
+/// Applies a named scenario preset to `cfg`.
+pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
+    cfg.stt.api_key_env = "SONIOX_API_KEY".into();
+    cfg.translate.provider = "openai".into();
+    cfg.translate.api_key_env = "OPENAI_API_KEY".into();
+    cfg.tts.provider = "edge".into();
+    match name {
+        "teams" => {
+            cfg.audio.duplex = true;
+            cfg.audio.remote_output_device = "CABLE".into();
+            cfg.audio.output_device = "耳机".into();
+            cfg.stt.language = "en".into();
+            cfg.stt.language_reverse = "zh".into();
+            cfg.translate.target = "Chinese".into();
+            cfg.translate.target_reverse = "English".into();
+            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
+            cfg.tts.voice_reverse = "en-US-AriaNeural".into();
+            cfg.ui.subtitles = true;
+        }
+        "game" => {
+            cfg.audio.mode = "listen".into();
+            cfg.stt.language = "en".into();
+            cfg.translate.target = "Chinese".into();
+            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
+            cfg.ui.subtitles = true;
+        }
+        "record" => {
+            cfg.audio.mode = "listen".into();
+            cfg.stt.language = "auto".into();
+            cfg.translate.target = "Chinese".into();
+            cfg.tts.provider = "none".into();
+            cfg.ui.subtitles = true;
+            cfg.ui.transcript_path = "transcript.txt".into();
+        }
+        _ => anyhow::bail!("未知预设: {name}"),
+    }
+    Ok(())
+}
 

@@ -442,6 +442,21 @@ impl Drop for VoskStt {
     }
 }
 
+#[cfg(windows)]
+unsafe fn add_dll_dir(dir: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::LibraryLoader::{
+        AddDllDirectory, SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+    };
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    AddDllDirectory(wide.as_ptr());
+}
+
 fn load_vosk_library() -> Result<libloading::Library> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -452,6 +467,10 @@ fn load_vosk_library() -> Result<libloading::Library> {
     candidates.push(crate::config::default_models_dir().join("libvosk.dll"));
     for path in candidates {
         if path.exists() {
+            #[cfg(windows)]
+            if let Some(dir) = path.parent() {
+                unsafe { add_dll_dir(dir) };
+            }
             if let Ok(lib) = unsafe { libloading::Library::new(&path) } {
                 return Ok(lib);
             }
@@ -494,6 +513,7 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
 fn _b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
 
 
 

@@ -9,6 +9,7 @@ mod keys;
 mod livetest;
 mod recorder;
 mod palabra;
+mod paths;
 mod palabratest;
 mod models;
 mod silero_vad;
@@ -56,48 +57,17 @@ fn preset(args: &[String]) -> Result<()> {
     let name = args.get(1).map(String::as_str).unwrap_or("");
     let path = flag(args, "--config").unwrap_or_else(|| "simulvoice.toml".into());
     let mut cfg = Config::default();
-    cfg.stt.api_key_env = "SONIOX_API_KEY".into();
-    cfg.translate.provider = "openai".into();
-    cfg.translate.api_key_env = "OPENAI_API_KEY".into();
-    cfg.tts.provider = "edge".into();
-    match name {
-        "teams" => {
-            cfg.audio.duplex = true;
-            cfg.audio.remote_output_device = "CABLE".into();
-            cfg.audio.output_device = "耳机".into();
-            cfg.stt.language = "en".into();
-            cfg.stt.language_reverse = "zh".into();
-            cfg.translate.target = "Chinese".into();
-            cfg.translate.target_reverse = "English".into();
-            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
-            cfg.tts.voice_reverse = "en-US-AriaNeural".into();
-            cfg.ui.subtitles = true;
-            println!("Teams 双向：会议麦克风选 CABLE Output；把 output_device 改成你的耳机名");
-        }
-        "game" => {
-            cfg.audio.mode = "listen".into();
-            cfg.stt.language = "en".into();
-            cfg.translate.target = "Chinese".into();
-            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
-            cfg.ui.subtitles = true;
-            println!("游戏听译：input=loopback 或 pid；output_device 建议耳机");
-        }
-        "record" => {
-            cfg.audio.mode = "listen".into();
-            cfg.stt.language = "auto".into();
-            cfg.translate.target = "Chinese".into();
-            cfg.tts.provider = "none".into();
-            cfg.ui.subtitles = true;
-            cfg.ui.transcript_path = "transcript.txt".into();
-            println!("会议记录：仅字幕 + transcript.txt，不朗读");
-        }
-        _ => return Err(anyhow!("用法: preset <teams|game|record> [--config 文件]")),
-    }
+    config::apply_preset(&mut cfg, name)?;
     cfg.save(&path)?;
     println!("已写入 {path}");
+    match name {
+        "teams" => println!("Teams 双向：麦克风选 CABLE Output，output_device 改成耳机名"),
+        "game" => println!("游戏听译：input=loopback 或 pid，output_device 建议耳机"),
+        "record" => println!("会议记录：仅字幕 + transcript.txt"),
+        _ => {}
+    }
     Ok(())
 }
-
 fn doctor(args: &[String]) -> Result<()> {
     let path = flag(args, "--config");
     let cfg = Config::load(path.as_deref())?;
@@ -155,7 +125,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.9.8 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.10.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -214,6 +184,7 @@ fn main() -> Result<()> {
         }
         default_hook(info);
     }));
+    paths::ensure_layout();
     keys::load_env();
     hotkeys::start();
     let _ = ctrlc::set_handler(|| {
@@ -266,7 +237,8 @@ fn main() -> Result<()> {
         Some("palabratest") => palabratest::run(&args),
         Some("volctest") => volctest::run(&args),
         Some("settings") => {
-            let path = flag(&args, "--config").unwrap_or_else(|| "simulvoice.toml".into());
+            let path = flag(&args, "--config")
+                .unwrap_or_else(|| paths::default_config_path().display().to_string());
             let cfg = Config::load(Some(&path))?;
             ui::run_settings(cfg, path)
         }
@@ -281,10 +253,28 @@ fn main() -> Result<()> {
             }
             _ => Err(anyhow!("用法: keys encrypt|test [--config keys.toml]")),
         },
+        Some("data-dir") => match args.get(1) {
+            None => {
+                println!("{}", paths::data_dir().display());
+                Ok(())
+            }
+            Some(p) => {
+                let old = paths::data_dir();
+                paths::set_data_dir(p)?;
+                if args.iter().any(|a| a == "--move") {
+                    paths::move_data(&old, std::path::Path::new(p))?;
+                }
+                println!("数据目录: {p}（重启后生效）");
+                Ok(())
+            }
+        },
         Some("preset") => preset(&args),
         Some("doctor") => doctor(&args),
         Some("config-init") => {
-            let path = args.get(1).cloned().unwrap_or_else(|| "simulvoice.toml".into());
+            let path = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| paths::default_config_path().display().to_string());
             Config::write_template(&path)?;
             println!("已生成配置: {path}");
             Ok(())
@@ -299,6 +289,11 @@ fn main() -> Result<()> {
             run(path.as_deref(), seconds)
         }
         _ => {
+            if args.is_empty() {
+                let cfg = Config::load(None)?;
+                let path = paths::default_config_path().display().to_string();
+                return ui::run_settings(cfg, path);
+            }
             help();
             Ok(())
         }
@@ -1320,6 +1315,10 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
+
 
 
 

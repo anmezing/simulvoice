@@ -75,11 +75,25 @@ fn worker(
     end_rx: Receiver<()>,
     ev_tx: Sender<LiveEvent>,
 ) -> Result<()> {
-    let (_stream, handle) = crate::sink::open_output(Some(&out_device))?;
-    let sink = rodio::Sink::try_new(&handle)?;
+    let controller = crate::audio_out::AudioOutputController::open(Some(&out_device))?;
+    let sink = controller.sink();
     let mut jitter = crate::dsp::JitterBuffer::new(24_000);
+    let mut stop_seen = if inbound {
+        crate::STOP_IN_GEN.load(std::sync::atomic::Ordering::SeqCst)
+    } else {
+        crate::STOP_OUT_GEN.load(std::sync::atomic::Ordering::SeqCst)
+    };
 
     loop {
+        let current = if inbound {
+            crate::STOP_IN_GEN.load(std::sync::atomic::Ordering::SeqCst)
+        } else {
+            crate::STOP_OUT_GEN.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        if current != stop_seen {
+            stop_seen = current;
+            controller.stop();
+        }
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
@@ -282,6 +296,7 @@ fn handle_server(
     }
     Ok(())
 }
+
 
 
 

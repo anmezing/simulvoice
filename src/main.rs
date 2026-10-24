@@ -1,4 +1,5 @@
 mod aec;
+mod audio_out;
 mod capture;
 mod config;
 mod dsp;
@@ -39,6 +40,8 @@ pub static DUCK: AtomicBool = AtomicBool::new(true);
 pub static BARGE_IN: AtomicBool = AtomicBool::new(false);
 pub static STOP_TTS: AtomicBool = AtomicBool::new(false);
 pub static STOP_TTS_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STOP_IN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STOP_OUT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static QUEUE_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(32);
 pub static PTT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 0=auto 1=toggle 2=hold 3=hold_translate
@@ -463,7 +466,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.35.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.36.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -1638,6 +1641,7 @@ fn run_realtime(
                 }
             };
             let mut last_send = std::time::Instant::now();
+            let mut stop_seen = if outbound { STOP_OUT_GEN.load(Ordering::SeqCst) } else { STOP_IN_GEN.load(Ordering::SeqCst) };
 
             while !STOP.load(Ordering::SeqCst) {
                 if let Some(secs) = seconds {
@@ -1780,7 +1784,14 @@ fn run_realtime(
                 let mut tts_cache: std::collections::HashMap<String, Vec<u8>> =
                     std::collections::HashMap::new();
                 let mut stop_gen = STOP_TTS_GEN.load(Ordering::SeqCst);
+                let mut dir_seen = if inbound_tts { STOP_IN_GEN.load(Ordering::SeqCst) } else { STOP_OUT_GEN.load(Ordering::SeqCst) };
                 while let Ok(text) = say_rx.recv() {
+                    let current = if inbound_tts { STOP_IN_GEN.load(Ordering::SeqCst) } else { STOP_OUT_GEN.load(Ordering::SeqCst) };
+                    if current != dir_seen {
+                        dir_seen = current;
+                        sink_w.stop();
+                        sink_w.play();
+                    }
                     if TTS_BACKLOG.load(Ordering::SeqCst) > 0 {
                         TTS_BACKLOG.fetch_sub(1, Ordering::SeqCst);
                     }
@@ -2457,6 +2468,11 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     ra?;
     rb
 }
+
+
+
+
+
 
 
 

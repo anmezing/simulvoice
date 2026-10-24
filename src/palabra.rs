@@ -117,12 +117,19 @@ fn audio_msg(pcm: &[i16]) -> Message {
 pub struct PalabraSession {
     ws: tungstenite::WebSocket<MaybeTlsStream<std::net::TcpStream>>,
     pub out_rate: u32,
-    sink: Option<rodio::Sink>,
+    sink: Option<std::sync::Arc<rodio::Sink>>,
     jitter: crate::dsp::JitterBuffer,
-    _stream: Option<rodio::OutputStream>,
+    _controller: Option<crate::audio_out::AudioOutputController>,
 }
 
 impl PalabraSession {
+    pub fn stop_playback(&self) {
+        if let Some(s) = &self.sink {
+            s.stop();
+            s.play();
+        }
+    }
+
     pub fn audio_active(&self) -> bool {
         self.sink.as_ref().map(|s| !s.empty()).unwrap_or(false)
     }
@@ -139,9 +146,10 @@ impl PalabraSession {
             let _ = s.sock.set_read_timeout(Some(Duration::from_millis(30)));
         }
         ws.send(Message::Text(set_task(cfg).to_string().into()))?;
-        let (stream, sink) = if cfg.speech {
-            let (stream, handle) = crate::sink::open_output(out_device)?;
-            (Some(stream), Some(rodio::Sink::try_new(&handle)?))
+        let (controller, sink) = if cfg.speech {
+            let controller = crate::audio_out::AudioOutputController::open(out_device)?;
+            let sink = controller.sink();
+            (Some(controller), Some(sink))
         } else {
             (None, None)
         };
@@ -150,7 +158,7 @@ impl PalabraSession {
             out_rate: 24_000,
             sink,
             jitter: crate::dsp::JitterBuffer::new(24_000),
-            _stream: stream,
+            _controller: controller,
         })
     }
 
@@ -299,6 +307,8 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
+
 
 
 

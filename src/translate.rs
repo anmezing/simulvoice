@@ -151,6 +151,7 @@ impl Translator for PassThroughTranslator {
 pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>> {
     Ok(match cfg.provider.as_str() {
         "none" => Box::new(PassThroughTranslator),
+        "marian" => Box::new(crate::marian::MarianTranslator::new(&cfg.target, &cfg.marian_dir)?),
         "gemini" => {
             let key = std::env::var(&cfg.api_key_env)
                 .or_else(|_| std::env::var("GEMINI_API_KEY"))
@@ -216,6 +217,8 @@ pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>
         }
     })
 }
+
+
 
 
 

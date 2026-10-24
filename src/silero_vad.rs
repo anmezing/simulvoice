@@ -14,6 +14,16 @@ pub struct SileroVad {
 
 impl SileroVad {
     pub fn new(model_path: &str, silence_ms: u64, max_utterance_ms: u64) -> Result<Self> {
+        Self::with_options(model_path, silence_ms, max_utterance_ms, "cpu", 1)
+    }
+
+    pub fn with_options(
+        model_path: &str,
+        silence_ms: u64,
+        max_utterance_ms: u64,
+        provider: &str,
+        threads: u32,
+    ) -> Result<Self> {
         use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
         let config = VadModelConfig {
@@ -26,8 +36,8 @@ impl SileroVad {
                 max_speech_duration: max_utterance_ms as f32 / 1000.0,
             },
             sample_rate: 16_000,
-            num_threads: 1,
-            provider: Some("cpu".into()),
+            num_threads: threads.max(1) as i32,
+            provider: Some(provider.to_string()),
             debug: false,
             ..Default::default()
         };
@@ -90,5 +100,7 @@ impl SileroVad {
         }
     }
 }
+
+
 
 

@@ -227,3 +227,21 @@ impl PreRoll {
 
 
 
+
+/// Trims leading/trailing near-silence from mono or interleaved PCM.
+pub fn trim_silence(samples: &mut Vec<f32>, threshold: f32) {
+    let Some(first) = samples.iter().position(|s| s.abs() > threshold) else {
+        samples.clear();
+        return;
+    };
+    let Some(last) = samples.iter().rposition(|s| s.abs() > threshold) else {
+        samples.clear();
+        return;
+    };
+    if first > 0 {
+        samples.drain(..first);
+    }
+    let keep = last - first + 1;
+    samples.truncate(keep);
+}
+

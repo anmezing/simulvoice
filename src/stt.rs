@@ -13,13 +13,18 @@ pub enum SttEngine {
     Soniox(SonioxStt),
     OpenAi(OpenAiStt),
     Vosk(VoskStt),
+    Sherpa(SherpaStt),
+    Zipformer(ZipformerStt),
     None,
 }
 
 impl SttEngine {
     pub fn begin_utterance(&mut self) {
-        if let SttEngine::OpenAi(s) = self {
-            s.buffer.clear();
+        match self {
+            SttEngine::OpenAi(s) => s.buffer.clear(),
+            SttEngine::Sherpa(s) => s.buffer.clear(),
+            SttEngine::Zipformer(s) => s.begin(),
+            _ => {}
         }
     }
 
@@ -31,6 +36,11 @@ impl SttEngine {
                 Ok(())
             }
             SttEngine::Vosk(s) => s.feed(pcm),
+            SttEngine::Sherpa(s) => {
+                s.buffer.extend_from_slice(pcm);
+                Ok(())
+            }
+            SttEngine::Zipformer(s) => s.feed(pcm),
             SttEngine::None => Ok(()),
         }
     }
@@ -55,6 +65,7 @@ impl SttEngine {
         match self {
             SttEngine::Vosk(s) => s.partial(),
             SttEngine::Soniox(s) => s.partial(),
+            SttEngine::Zipformer(s) => s.partial(),
             _ => None,
         }
     }
@@ -70,12 +81,174 @@ impl SttEngine {
                 let text = s.transcribe(&audio)?;
                 Ok(if text.trim().is_empty() { None } else { Some(text) })
             }
+            SttEngine::Sherpa(s) => {
+                if s.buffer.is_empty() {
+                    return Ok(None);
+                }
+                let text = s.transcribe()?;
+                Ok(if text.trim().is_empty() { None } else { Some(text) })
+            }
+            SttEngine::Zipformer(s) => s.end_utterance(),
             _ => Ok(None),
         }
     }
 }
 
 // ───────────────────────────── Soniox (cloud streaming) ─────────────────────────────
+
+pub struct SherpaStt {
+    recognizer: sherpa_onnx::OfflineRecognizer,
+    buffer: Vec<i16>,
+}
+
+impl SherpaStt {
+    pub fn new(model_dir: &str, language: &str) -> Result<Self> {
+        use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
+        let dir = std::path::Path::new(model_dir);
+        let model = ["model.int8.onnx", "model.onnx"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|p| p.exists())
+            .ok_or_else(|| anyhow!("SenseVoice 模型不存在: {}", dir.display()))?;
+        let tokens = dir.join("tokens.txt");
+        if !tokens.exists() {
+            return Err(anyhow!("SenseVoice tokens.txt 不存在: {}", dir.display()));
+        }
+        let lang = match language.trim() {
+            "" | "auto" => "auto".to_string(),
+            "cn" => "zh".to_string(),
+            other => other.to_string(),
+        };
+        let mut config = OfflineRecognizerConfig::default();
+        config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
+            model: Some(model.display().to_string()),
+            language: Some(lang),
+            use_itn: true,
+        };
+        config.model_config.tokens = Some(tokens.display().to_string());
+        config.model_config.num_threads = 2;
+        config.model_config.provider = Some(
+            crate::ONNX_PROVIDER
+                .get()
+                .cloned()
+                .unwrap_or_else(|| "cpu".into()),
+        );
+        config.model_config.debug = false;
+        let recognizer = OfflineRecognizer::create(&config)
+            .ok_or_else(|| anyhow!("SenseVoice 模型加载失败: {}", dir.display()))?;
+        Ok(Self {
+            recognizer,
+            buffer: Vec::new(),
+        })
+    }
+
+    fn transcribe(&mut self) -> Result<String> {
+        let samples: Vec<f32> = self
+            .buffer
+            .iter()
+            .map(|&s| s as f32 / 32768.0)
+            .collect();
+        self.buffer.clear();
+        let stream = self.recognizer.create_stream();
+        stream.accept_waveform(16_000, &samples);
+        self.recognizer.decode(&stream);
+        Ok(stream
+            .get_result()
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_default())
+    }
+}
+
+pub struct ZipformerStt {
+    recognizer: sherpa_onnx::OnlineRecognizer,
+    stream: sherpa_onnx::OnlineStream,
+}
+
+impl ZipformerStt {
+    pub fn new(model_dir: &str) -> Result<Self> {
+        use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineTransducerModelConfig};
+        let dir = std::path::Path::new(model_dir);
+        let pick = |prefix: &str| -> Option<std::path::PathBuf> {
+            let mut candidates: Vec<_> = std::fs::read_dir(dir)
+                .ok()?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().and_then(|e| e.to_str()) == Some("onnx")
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with(prefix))
+                            .unwrap_or(false)
+                })
+                .collect();
+            candidates.sort_by_key(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.contains(".int8.") { 0 } else { 1 }
+            });
+            candidates.into_iter().next()
+        };
+        let encoder = pick("encoder").ok_or_else(|| anyhow!("Zipformer encoder 不存在: {}", dir.display()))?;
+        let decoder = pick("decoder").ok_or_else(|| anyhow!("Zipformer decoder 不存在: {}", dir.display()))?;
+        let joiner = pick("joiner").ok_or_else(|| anyhow!("Zipformer joiner 不存在: {}", dir.display()))?;
+        let tokens = dir.join("tokens.txt");
+        if !tokens.exists() {
+            return Err(anyhow!("Zipformer tokens.txt 不存在: {}", dir.display()));
+        }
+        let mut config = OnlineRecognizerConfig::default();
+        config.model_config.transducer = OnlineTransducerModelConfig {
+            encoder: Some(encoder.display().to_string()),
+            decoder: Some(decoder.display().to_string()),
+            joiner: Some(joiner.display().to_string()),
+        };
+        config.model_config.tokens = Some(tokens.display().to_string());
+        config.model_config.num_threads = 2;
+        config.model_config.provider = Some(
+            crate::ONNX_PROVIDER
+                .get()
+                .cloned()
+                .unwrap_or_else(|| "cpu".into()),
+        );
+        config.model_config.debug = false;
+        config.decoding_method = Some("greedy_search".into());
+        config.enable_endpoint = false;
+        let recognizer = OnlineRecognizer::create(&config)
+            .ok_or_else(|| anyhow!("Zipformer 模型加载失败: {}", dir.display()))?;
+        let stream = recognizer.create_stream();
+        Ok(Self { recognizer, stream })
+    }
+
+    fn begin(&mut self) {
+        self.recognizer.reset(&self.stream);
+    }
+
+    fn feed(&mut self, pcm: &[i16]) -> Result<()> {
+        let samples: Vec<f32> = pcm.iter().map(|&s| s as f32 / 32768.0).collect();
+        self.stream.accept_waveform(16_000, &samples);
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
+        Ok(())
+    }
+
+    fn partial(&mut self) -> Option<String> {
+        self.recognizer
+            .get_result(&self.stream)
+            .map(|r| r.text.trim().to_string())
+            .filter(|t| !t.is_empty())
+    }
+
+    fn end_utterance(&mut self) -> Result<Option<String>> {
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
+        let text = self
+            .recognizer
+            .get_result(&self.stream)
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_default();
+        self.recognizer.reset(&self.stream);
+        Ok(if text.is_empty() { None } else { Some(text) })
+    }
+}
 
 pub struct SonioxStt {
     audio_tx: Sender<Vec<i16>>,
@@ -496,6 +669,28 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
                 .map_err(|_| anyhow!("环境变量 {} 未设置", cfg.api_key_env))?;
             SttEngine::OpenAi(OpenAiStt::new(key, cfg.model.clone()))
         }
+        "sherpa" => {
+            let path = if cfg.model_path.trim().is_empty() {
+                crate::config::default_models_dir()
+                    .join("sensevoice")
+                    .display()
+                    .to_string()
+            } else {
+                cfg.model_path.clone()
+            };
+            SttEngine::Sherpa(SherpaStt::new(&path, &cfg.language)?)
+        }
+        "zipformer" => {
+            let path = if cfg.model_path.trim().is_empty() {
+                crate::config::default_models_dir()
+                    .join("zipformer")
+                    .display()
+                    .to_string()
+            } else {
+                cfg.model_path.clone()
+            };
+            SttEngine::Zipformer(ZipformerStt::new(&path)?)
+        }
         "vosk" => {
             let path = if cfg.model_path.trim().is_empty() {
                 crate::config::default_models_dir()
@@ -520,6 +715,9 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
 fn _b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
+
+
 
 
 

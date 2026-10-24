@@ -1,7 +1,12 @@
 [package]
 name = "simulvoice"
-version = "0.15.0"
+version = "0.35.0"
 edition = "2021"
+
+[features]
+default = ["sherpa-static"]
+sherpa-static = ["sherpa-onnx/static"]
+directml = ["sherpa-onnx/shared"]
 
 [dependencies]
 anyhow = "1"
@@ -26,18 +31,49 @@ dirs = "5"
 windows = { version = "0.61", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_Foundation"] }
 nnnoiseless = "0.5"
 eframe = "0.29"
-sherpa-onnx = "1.12"
+sherpa-onnx = { version = "1.13.8", default-features = false }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic"] }
+tokenizers = "0.22"
+realfft = "3"
+wsola = "0.2"
+aec-rs = "1.0"
 tar = "0.4"
 bzip2 = "0.4"
 rubato = "0.15"
 ctrlc = "3"
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Threading"] }
 fs2 = "0.4"
 
 [profile.release]
 lto = "thin"
 strip = true
 codegen-units = 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

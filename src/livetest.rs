@@ -52,6 +52,7 @@ pub fn run(args: &[String]) -> Result<()> {
         &instruction,
         &cfg.realtime.voice,
         &cfg.realtime.output_device,
+        true,
     )?;
 
     let mut pcm = decode_16k(&path)?;

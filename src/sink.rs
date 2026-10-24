@@ -83,3 +83,35 @@ pub fn default_output_name() -> Option<String> {
 
 
 
+
+/// Picks sensible devices for the Teams preset:
+/// virtual mic = first CABLE device, listening = first non-default, non-virtual output.
+pub fn auto_pick_teams(output_device: &mut String, remote_output_device: &mut String) -> (bool, bool) {
+    let outputs = list_output_devices().unwrap_or_default();
+    let default_name = default_output_name().unwrap_or_default().to_lowercase();
+
+    let mut cable_found = false;
+    if let Some(cable) = outputs.iter().find(|n| {
+        let l = n.to_lowercase();
+        l.contains("cable") || l.contains("vb-audio") || l.contains("voicemeeter")
+    }) {
+        *remote_output_device = cable.clone();
+        cable_found = true;
+    }
+
+    let preferred = outputs.iter().find(|n| {
+        let l = n.to_lowercase();
+        l.contains("耳机") || l.contains("headphone") || l.contains("headset") || l.contains("earphone")
+    });
+    let fallback = outputs.iter().find(|n| {
+        let l = n.to_lowercase();
+        l != default_name && !l.contains("cable") && !l.contains("vb-audio")
+    });
+    let mut output_found = false;
+    if let Some(dev) = preferred.or(fallback) {
+        *output_device = dev.clone();
+        output_found = true;
+    }
+    (cable_found, output_found)
+}
+

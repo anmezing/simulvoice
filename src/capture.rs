@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
@@ -160,6 +160,7 @@ fn run_capture(
     let frame_bytes = bytes_ps * ch;
 
     while !crate::STOP.load(Ordering::SeqCst) {
+        LAST_TICK.store(now_secs(), Ordering::Relaxed);
         if cap.read_from_device_to_deque(&mut dq).is_err() {
             break;
         }
@@ -256,6 +257,19 @@ fn find_device(direction: &Direction, needle: &str) -> Result<wasapi::Device> {
     Err(anyhow!("找不到设备包含 '{}'（用 simulvoice devices 查看）", needle))
 }
 
+static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn last_tick() -> u64 {
+    LAST_TICK.load(Ordering::Relaxed)
+}
+
 pub fn rms(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -263,6 +277,7 @@ pub fn rms(samples: &[i16]) -> f64 {
     let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
     (sum / samples.len() as f64).sqrt()
 }
+
 
 
 

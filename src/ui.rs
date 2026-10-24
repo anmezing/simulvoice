@@ -133,6 +133,14 @@ impl eframe::App for SubtitleApp {
                     .inner_margin(14.0),
             )
             .show(ctx, |ui| {
+                let backlog = crate::TTS_BACKLOG.load(std::sync::atomic::Ordering::Relaxed);
+                if backlog > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("积压约 {} 秒（{} 句）", backlog * 3, backlog))
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(240, 180, 80)),
+                    );
+                }
                 if !s.in_src.is_empty() || !s.in_dst.is_empty() {
                     ui.label(
                         egui::RichText::new(format!("对方  {}", s.in_src))
@@ -180,8 +188,12 @@ impl eframe::App for SubtitleApp {
 
 pub fn run_settings(cfg: crate::config::Config, path: String) -> anyhow::Result<()> {
     let extra_text = cfg.translate.extra_targets.join(", ");
+    let outputs = crate::sink::list_output_devices().unwrap_or_default();
+    let inputs = crate::sink::list_input_devices().unwrap_or_default();
+    let outputs = crate::sink::list_output_devices().unwrap_or_default();
+    let inputs = crate::sink::list_input_devices().unwrap_or_default();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([620.0, 820.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 900.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -196,6 +208,8 @@ pub fn run_settings(cfg: crate::config::Config, path: String) -> anyhow::Result<
                 busy: Arc::new(AtomicBool::new(false)),
                 model_status: Arc::new(Mutex::new(String::new())),
                 extra_text,
+                outputs,
+                inputs,
             }))
         }),
     )
@@ -209,6 +223,8 @@ struct SettingsApp {
     busy: Arc<AtomicBool>,
     model_status: Arc<Mutex<String>>,
     extra_text: String,
+    outputs: Vec<String>,
+    inputs: Vec<String>,
 }
 
 fn pick_folder() -> Option<String> {
@@ -221,6 +237,53 @@ fn pick_folder() -> Option<String> {
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
+}
+
+fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[String]) {
+    let current = value.clone();
+    let label = if current.is_empty() {
+        "系统默认".to_string()
+    } else {
+        current.clone()
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, String::new(), "系统默认");
+            for option in options {
+                ui.selectable_value(value, option.clone(), option);
+            }
+            if !current.is_empty() && !options.contains(&current) {
+                ui.selectable_value(value, current.clone(), current.clone());
+            }
+        });
+}
+
+fn provider_cards(ui: &mut egui::Ui, current: &mut String, options: &[(&str, &str)]) {
+    ui.horizontal_wrapped(|ui| {
+        for (id, desc) in options {
+            let selected = current == id;
+            let fill = if selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.inactive.weak_bg_fill
+            };
+            let button = egui::Button::new(
+                egui::RichText::new(format!("{id}\n{desc}"))
+                    .size(12.0)
+                    .color(if selected {
+                        ui.visuals().selection.stroke.color
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+            )
+            .min_size(egui::vec2(96.0, 44.0))
+            .fill(fill);
+            if ui.add(button).clicked() {
+                *current = id.to_string();
+            }
+        }
+    });
 }
 
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
@@ -236,23 +299,60 @@ fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             ui.heading("simulvoice 设置");
+            ui.add_space(8.0);
+            ui.label("引擎选择");
+            ui.add_space(4.0);
+            ui.label("识别 STT");
+            provider_cards(ui, &mut self.cfg.stt.provider, &[
+                ("soniox", "流式·推荐"),
+                ("openai", "批量上传"),
+                ("vosk", "本地离线"),
+                ("sherpa", "SenseVoice"),
+                ("zipformer", "流式 Zipformer"),
+                ("none", "关闭"),
+            ]);
+            ui.add_space(2.0);
+            ui.label("翻译");
+            provider_cards(ui, &mut self.cfg.translate.provider, &[
+                ("openai", "推荐"),
+                ("gemini", "免费额度"),
+                ("ollama", "本地"),
+                ("qwen", "阿里云"),
+                ("custom", "自定义"),
+                ("marian", "离线中英"),
+                ("none", "不翻译"),
+            ]);
+            ui.add_space(2.0);
+            ui.label("朗读 TTS");
+            provider_cards(ui, &mut self.cfg.tts.provider, &[
+                ("edge", "在线·自然"),
+                ("sapi", "系统离线"),
+                ("sherpa", "本地模型"),
+                ("openai", "在线"),
+                ("none", "静音"),
+            ]);
+            ui.add_space(2.0);
+            ui.label("实时引擎");
+            provider_cards(ui, &mut self.cfg.realtime.provider, &[
+                ("none", "关闭"),
+                ("gemini-live", "低延迟"),
+                ("palabra", "低延迟"),
+                ("volcengine", "火山"),
+            ]);
             ui.add_space(8.0);
             egui::Grid::new("settings")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("STT 引擎");
-                    combo(ui, "stt", &mut self.cfg.stt.provider, &["soniox", "openai", "vosk", "none"]);
-                    ui.end_row();
                     ui.label("入向语言");
                     ui.text_edit_singleline(&mut self.cfg.stt.language);
                     ui.end_row();
                     ui.label("出向语言");
                     ui.text_edit_singleline(&mut self.cfg.stt.language_reverse);
-                    ui.end_row();
-                    ui.label("翻译引擎");
-                    combo(ui, "tr", &mut self.cfg.translate.provider, &["openai", "gemini", "ollama", "qwen", "custom", "none"]);
                     ui.end_row();
                     ui.label("翻译目标(入向)");
                     ui.text_edit_singleline(&mut self.cfg.translate.target);
@@ -269,8 +369,14 @@ impl eframe::App for SettingsApp {
                     ui.label("额外字幕语言");
                     ui.text_edit_singleline(&mut self.extra_text);
                     ui.end_row();
-                    ui.label("TTS 引擎");
-                    combo(ui, "tts", &mut self.cfg.tts.provider, &["edge", "sapi", "sherpa", "openai", "none"]);
+                    ui.label("ONNX Provider");
+                    ui.text_edit_singleline(&mut self.cfg.dsp.onnx_provider);
+                    ui.end_row();
+                    ui.label("TTS/VAD 线程");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut self.cfg.tts.threads).range(1..=8));
+                        ui.add(egui::DragValue::new(&mut self.cfg.dsp.vad_threads).range(1..=8));
+                    });
                     ui.end_row();
                     ui.label("入向音色");
                     ui.text_edit_singleline(&mut self.cfg.tts.voice);
@@ -282,16 +388,16 @@ impl eframe::App for SettingsApp {
                     combo(ui, "input", &mut self.cfg.audio.input, &["loopback", "pid", "mic"]);
                     ui.end_row();
                     ui.label("入向输出设备");
-                    ui.text_edit_singleline(&mut self.cfg.audio.output_device);
+                    device_combo(ui, "outdev", &mut self.cfg.audio.output_device, &self.outputs);
                     ui.end_row();
                     ui.label("麦克风设备");
-                    ui.text_edit_singleline(&mut self.cfg.audio.mic_device);
+                    device_combo(ui, "micdev", &mut self.cfg.audio.mic_device, &self.inputs);
                     ui.end_row();
                     ui.label("出向输出(虚拟麦)");
-                    ui.text_edit_singleline(&mut self.cfg.audio.remote_output_device);
+                    device_combo(ui, "remotedev", &mut self.cfg.audio.remote_output_device, &self.outputs);
                     ui.end_row();
                     ui.label("回环采集设备");
-                    ui.text_edit_singleline(&mut self.cfg.audio.loopback_device);
+                    device_combo(ui, "loopdev", &mut self.cfg.audio.loopback_device, &self.outputs);
                     ui.end_row();
                     ui.label("实时模型");
                     ui.text_edit_singleline(&mut self.cfg.realtime.model);
@@ -303,16 +409,69 @@ impl eframe::App for SettingsApp {
                     ui.text_edit_singleline(&mut self.cfg.realtime.voice_reverse);
                     ui.end_row();
                     ui.label("实时输出设备");
-                    ui.text_edit_singleline(&mut self.cfg.realtime.output_device);
+                    device_combo(ui, "rtdev", &mut self.cfg.realtime.output_device, &self.outputs);
                     ui.end_row();
-                    ui.label("实时引擎");
-                    combo(ui, "rt", &mut self.cfg.realtime.provider, &["none", "gemini-live", "palabra", "volcengine"]);
+                    ui.label("语音模式");
+                    combo(
+                        ui,
+                        "vmode",
+                        &mut self.cfg.audio.voice_mode,
+                        &["auto", "toggle", "hold", "hold_translate"],
+                    );
+                    ui.end_row();
+                    ui.label("监听设备");
+                    device_combo(ui, "mondev", &mut self.cfg.audio.monitor_device, &self.outputs);
+                    ui.end_row();
+                    ui.label("手动按键");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.cfg.audio.ptt_key)
+                                .desired_width(70.0),
+                        );
+                        ui.checkbox(&mut self.cfg.audio.ptt_ctrl, "Ctrl");
+                        ui.checkbox(&mut self.cfg.audio.ptt_alt, "Alt");
+                    });
+                    ui.end_row();
+                    ui.label("直通增益");
+                    ui.add(
+                        egui::Slider::new(&mut self.cfg.audio.passthrough_gain, 0.1..=4.0)
+                            .fixed_decimals(1),
+                    );
                     ui.end_row();
                 });
             ui.add_space(6.0);
             ui.checkbox(&mut self.cfg.audio.duplex, "双向同传");
             ui.checkbox(&mut self.cfg.audio.barge_in, "自动打断（实验性，可能漏听译文）");
+            ui.checkbox(&mut self.cfg.audio.cross_barge_in, "跨方向打断（对方说话时停另一方向译文）");
+            ui.checkbox(&mut self.cfg.audio.mute_inbound, "静音入向译文");
+            ui.checkbox(&mut self.cfg.audio.mute_outbound, "静音出向译文");
+            ui.horizontal(|ui| { ui.label("积压跳播(秒,0=关)"); ui.add(egui::DragValue::new(&mut self.cfg.audio.backlog_jump_secs).range(0..=120)); });
+            ui.label(
+                egui::RichText::new(format!(
+                    "双向: {} | AEC: {} | 跨向打断: {} | 队列上限: {}",
+                    self.cfg.audio.duplex,
+                    if self.cfg.dsp.neural_aec { "神经" } else if self.cfg.dsp.aec { "Speex" } else { "关" },
+                    self.cfg.audio.cross_barge_in,
+                    self.cfg.audio.queue_limit
+                ))
+                .small()
+                .weak(),
+            );
+            ui.checkbox(&mut self.cfg.audio.echo_guard, "朗读译文时暂停出向识别（外放防回环）");
+            ui.checkbox(&mut self.cfg.audio.passthrough, "原声直通到虚拟麦克风");
+            ui.checkbox(&mut self.cfg.audio.monitor_translation, "译文同时回放给自己");
+            ui.checkbox(&mut self.cfg.ui.keep_translation, "保留译音（F6 回放）");
+            ui.checkbox(&mut self.cfg.ui.record_source, "录制原始音频 WAV");
+            let ptt_desc = format!(
+                "{}{}{}：开始/结束（toggle）或按住（hold）；F6 回放最近译文；F8 停止译文；F9 静音；F10 退出",
+                if self.cfg.audio.ptt_ctrl { "Ctrl+" } else { "" },
+                if self.cfg.audio.ptt_alt { "Alt+" } else { "" },
+                self.cfg.audio.ptt_key
+            );
+            ui.label(egui::RichText::new(ptt_desc).small().weak());
             ui.checkbox(&mut self.cfg.dsp.denoise, "RNNoise 降噪");
+            ui.checkbox(&mut self.cfg.dsp.aec, "AEC 回声消除（外放时用输出设备回环作参考）");
+            ui.checkbox(&mut self.cfg.dsp.neural_aec, "神经 AEC（可选，替代 Speex）");
             ui.checkbox(&mut self.cfg.dsp.duck, "朗读时压低其他应用音量");
             ui.checkbox(&mut self.cfg.ui.subtitles, "双语字幕悬浮窗");
             ui.add_space(6.0);
@@ -422,9 +581,22 @@ impl eframe::App for SettingsApp {
             });
             ui.add_space(4.0);
             ui.label(&self.status);
+                });
         });
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -5,7 +5,7 @@ Windows 上的实时语音同传工具：捕获系统或指定进程的声音（
 ## 功能
 
 - **采集**：WASAPI 系统回环、指定进程（Windows 10 2004+）、麦克风，双向并行
-- **识别**：Soniox（流式）、OpenAI、Vosk（离线，模型可下载）
+- **识别**：Soniox（流式）、OpenAI、Vosk、SenseVoice / Zipformer（本地 ONNX）
 - **翻译**：OpenAI、Gemini、Qwen、任意 OpenAI 兼容端点、Ollama（本地）
 - **TTS**：Edge（免费）、OpenAI、Windows SAPI、Piper（离线）
 - **端到端实时引擎**：Gemini Live、Palabra.ai、火山引擎 Doubao（语音/文本直出）
@@ -16,6 +16,7 @@ Windows 上的实时语音同传工具：捕获系统或指定进程的声音（
 ## 构建
 
 要求：Windows 10/11、Rust stable（MSVC 工具链）。
+AEC 依赖静态编译 speexdsp：另需 CMake 与 LLVM/libclang（`.cargo/config.toml` 已指向本机路径；换机器需改 `CMAKE`、`LIBCLANG_PATH`）。
 
 ```powershell
 cargo build --release
@@ -78,6 +79,10 @@ provider = "gemini-live"   # 或 palabra / volcengine
 ```powershell
 simulvoice models vosk cn          # 中文离线识别（小模型）
 simulvoice models vosk cn-big      # 大模型（精度更高）
+simulvoice models sensevoice       # SenseVoice int8（ONNX，中英日韩粤）
+simulvoice models zipformer       # Zipformer 流式（中英）
+simulvoice models marian          # MarianNMT 离线中英翻译（约 500MB）
+simulvoice models aec             # 神经 AEC 模型（DEC baseline，可选）
 simulvoice models silero           # Silero VAD
 simulvoice models piper zh         # 离线神经 TTS（中文）
 ```
@@ -101,9 +106,33 @@ remote_output_device = "CABLE"  # 对方听到的译文（虚拟声卡）
 
 ## 热键 / 托盘
 
-- `Ctrl+Alt+F8`：停止当前译文（手动打断）\n- `Ctrl+Alt+F9`：静音/恢复译文朗读
+- `Ctrl+Alt+F7`：开始/结束（toggle）或按住（hold），取决于 `[audio] voice_mode`
+  - 按键可改：`ptt_key`、`ptt_ctrl`、`ptt_alt`
+- `Ctrl+Alt+F8`：停止当前译文（手动打断）
+- `Ctrl+Alt+F9`：静音/恢复译文朗读
 - `Ctrl+Alt+F10`：停止
+- `Ctrl+Alt+F6`：回放最近一次保存的译文
 - 托盘图标：双击静音，右键菜单「静音」「退出」
+
+## 按前台进程切换配置
+
+```toml
+[profiles]
+"Teams.exe" = "profiles/teams.toml"
+"game.exe"  = "profiles/game.toml"
+```
+
+```powershell
+simulvoice watch --config simulvoice.toml
+```
+
+前台进程变化时自动结束当前子进程并用对应配置重启；未匹配的进程回到基础配置。按 F10 或子进程正常退出会停止监视。
+
+## 录音与回放
+
+- `[ui] keep_translation = true` 默认保存译文 MP3 到数据目录 `recordings/`，`F6` 回放
+- `record_source = true` 才额外录制原始 WAV；`record_max_mb` 限制总大小
+- 外放且双向同传时开启 `[audio] echo_guard = true`：朗读译文期间暂停出向识别，避免回环
 
 ## 密钥
 
@@ -121,12 +150,13 @@ simulvoice keys test                         # 加解密自检
 ```toml
 version = 1
 [stt]        provider, language, language_reverse, api_key_env, model, model_path
-[translate]  provider, target, target_reverse, extra_targets, model, endpoint, api_key_env, glossary
+[translate]  provider, target, target_reverse, extra_targets, marian_dir, model, endpoint, api_key_env, glossary
 [tts]        provider, voice, voice_reverse, model, api_key_env, rate, model_dir
-[audio]      input, loopback_device, pid, duplex, mode, barge_in, mic_device, output_device, remote_output_device, vad_rms, silence_ms
-[dsp]        denoise, vad, agc, duck
-[ui]         subtitles, transcript_path, record_dir, record_max_mb
+[audio]      input, loopback_device, pid, duplex, voice_mode, ptt_key, ptt_ctrl, ptt_alt, barge_in, echo_guard, passthrough, passthrough_gain, mic_device, output_device, remote_output_device, monitor_translation, monitor_device, vad_rms, silence_ms, queue_limit
+[dsp]        denoise, vad, agc, duck, aec, aec_filter_ms
+[ui]         subtitles, transcript_path, record_dir, keep_translation, record_source, record_max_mb
 [realtime]   provider, model, voice, voice_reverse, output_device
+[profiles]   前台进程名 -> 配置文件（watch 模式）
 ```
 
 ## 架构
@@ -145,14 +175,55 @@ WASAPI / 进程回环 / 麦克风
 ## 已知限制
 
 - 仅 Windows
-- 未实现系统级 AEC：耳机漏音可能被麦克风拾取，建议使用封闭式耳机
-- 多语言额外字幕、barge-in 的自动模式只作用于经典链路；实时引擎固定单目标
-- 语音持续且 TTS 明显跟不上时，队列满会丢弃句子（默认上限 16 句）
+- AEC 默认开启 `[dsp] aec = true`：用输出设备回环作为参考（Speex），外放时抑制译文回声；不需要可关闭\n- 可选神经 AEC：`[dsp] neural_aec = true`（先 models aec），用 DEC baseline ONNX 替代 Speex，失败自动回退
+- 实时引擎双向已支持（`duplex=true` 时各开一条会话）；额外字幕与 `echo_guard` 已覆盖实时链路（barge-in 仍只作用于经典链路）
+- 语音持续且 TTS 明显跟不上时，队列满会丢弃句子；上限可配 `[audio] queue_limit`（默认 32 句）
 - 卸载保留 `<安装目录>\data`，避免误删模型与录音；需要时手动删除
-- 未实现：按前台进程切换配置、模型量化/DirectML、代码签名、运行看门狗
+- 未实现：模型量化/DirectML；代码签名需自行申请证书（可用 SignPath 免费 OSS 计划）
+## 本地模型加速
+
+- 默认 CPU：`[tts] onnx_provider`、`[dsp] onnx_provider` 均为 `cpu`。
+- DirectML 不在官方预编译包里：需自行用源码构建 sherpa-onnx（`-DSHERPA_ONNX_ENABLE_DIRECTML=ON -DBUILD_SHARED_LIBS=ON -DSHERPA_ONNX_USE_STATIC_CRT=OFF`），设置 `SHERPA_ONNX_LIB_DIR`，并随程序分发 onnxruntime/DirectML DLL，然后把 provider 改成 `directml`。
+- 当前本地 ONNX 链路已覆盖 SenseVoice / Zipformer ASR、Silero VAD、Piper TTS；`[stt] provider = "sherpa"` 用 SenseVoice，`"zipformer"` 用流式识别。
+- DirectML 版：源码编译 sherpa-onnx shared（`SHERPA_ONNX_ENABLE_DIRECTML=ON`）后运行 `package.ps1 -DirectML`，生成 `*-directml-portable.zip`（含 DirectML/onnxruntime DLL），解压后把 `[dsp]/[tts] onnx_provider` 设为 `directml`；缺 DLL 或驱动不支持时 sherpa 自动回退 CPU。
+- 量化模型可直接使用 int8 文件。
+
+## 代码签名
+
+免费途径：
+
+- **SignPath Foundation**：公开仓库 + OSI 许可证的 OSS 项目可免费获得 OV 级签名，但新项目可能因仓库历史不足被拒；可等仓库有历史/使用量后再申请。
+- **Microsoft Store（MSIX）**：走商店分发时由 Microsoft 免费重签，无需自备证书；需要做 MSIX 打包并上架。
+- **Certum Open Source**：约 €25/年，不是免费，但比普通 OV 便宜；安装证书后可用 `sign.ps1 -Thumbprint <SHA1>` 走证书容器/云签名。
+- **Azure Artifact Signing（原 Trusted Signing）**：约 $9.99/月，不免费。
+- 自签名证书免费，但公众机器不信任，只适合内网/测试。
+
+已有证书时：
+
+```powershell
+.\sign.ps1 -CertPath C:\path\cert.pfx -Password <password>
+# 或证书已装在 CurrentUser\My：
+.\sign.ps1 -Thumbprint <SHA1>
+```
+使用 Windows SDK 的 signtool 对 exe 与安装包做 SHA-256 时间戳签名。
+
 ## License
 
 MIT
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

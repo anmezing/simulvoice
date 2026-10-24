@@ -13,6 +13,8 @@ pub struct Config {
     pub dsp: DspConfig,
     pub ui: UiConfig,
     pub realtime: RealtimeConfig,
+    /// 前台进程名 -> 配置文件（watch 模式）
+    pub profiles: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,6 +48,8 @@ pub struct TranslateConfig {
     pub glossary: String,
     /// 额外字幕语言（仅字幕，不朗读）
     pub extra_targets: Vec<String>,
+    /// Marian model dir (empty = data/models/marian)
+    pub marian_dir: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,6 +65,10 @@ pub struct TtsConfig {
     pub rate: String,
     /// Piper/sherpa 本地 TTS 模型目录
     pub model_dir: String,
+    /// ONNX 执行提供者（cpu；DirectML 需自定义 sherpa-onnx 构建）
+    pub onnx_provider: String,
+    /// 本地 TTS 线程数
+    pub threads: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -89,6 +97,30 @@ pub struct AudioConfig {
     pub silence_ms: u64,
     /// 单句最长时长
     pub max_utterance_ms: u64,
+    /// 翻译/TTS 待处理队列上限（句）
+    pub queue_limit: u32,
+    /// auto | toggle | hold | hold_translate
+    pub voice_mode: String,
+    /// 手动模式按键（F1-F12、字母、空格、Pause 等）
+    pub ptt_key: String,
+    /// 手动模式是否需要 Ctrl
+    pub ptt_ctrl: bool,
+    /// 手动模式是否需要 Alt
+    pub ptt_alt: bool,
+    /// 原声直通到虚拟麦克风
+    pub passthrough: bool,
+    /// 原声直通增益
+    pub passthrough_gain: f32,
+    /// 朗读译文时暂停出向识别，避免外放被麦克风拾取形成回环
+    pub echo_guard: bool,
+    /// 出向译文同时回放给自己
+    pub monitor_translation: bool,
+    /// 监听设备（空=入向输出设备）
+    pub monitor_device: String,
+    pub cross_barge_in: bool,
+    pub mute_inbound: bool,
+    pub mute_outbound: bool,
+    pub backlog_jump_secs: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -104,6 +136,17 @@ pub struct DspConfig {
     pub agc: bool,
     /// 朗读时压低其他应用音量
     pub duck: bool,
+    /// AEC 回声消除（用输出设备回环作为参考）
+    pub aec: bool,
+    /// AEC 自适应滤波器长度（毫秒）
+    pub aec_filter_ms: u32,
+    /// ONNX 执行提供者（cpu；DirectML 需自定义 sherpa-onnx 构建）
+    pub onnx_provider: String,
+    /// Silero VAD 线程数
+    pub vad_threads: u32,
+    pub neural_aec: bool,
+    pub neural_aec_delay_ms: u32,
+    pub neural_aec_model: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,8 +156,12 @@ pub struct UiConfig {
     pub subtitles: bool,
     /// 双语转写导出路径（空=不导出）
     pub transcript_path: String,
-    /// 录音目录（原声 WAV + 译文 MP3；空=不录音）
+    /// 录音目录（原声 WAV + 译文 MP3；空=数据目录/recordings）
     pub record_dir: String,
+    /// 保存译文音频以便回放
+    pub keep_translation: bool,
+    /// 录制原始音频
+    pub record_source: bool,
     /// 录音总大小上限（MB，0=不限）
     pub record_max_mb: u64,
 }
@@ -130,6 +177,7 @@ impl Default for Config {
             dsp: DspConfig::default(),
             ui: UiConfig::default(),
             realtime: RealtimeConfig::default(),
+            profiles: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -157,6 +205,7 @@ impl Default for TranslateConfig {
             endpoint: "http://127.0.0.1:11434".into(),
             api_key_env: "OPENAI_API_KEY".into(),
             glossary: String::new(),
+            marian_dir: String::new(),
             extra_targets: Vec::new(),
         }
     }
@@ -172,6 +221,8 @@ impl Default for TtsConfig {
             api_key_env: "OPENAI_API_KEY".into(),
             rate: "+0%".into(),
             model_dir: default_models_dir().join("tts").display().to_string(),
+            onnx_provider: "cpu".into(),
+            threads: 2,
         }
     }
 }
@@ -187,10 +238,24 @@ impl Default for AudioConfig {
             remote_output_device: String::new(),
             duplex: false,
             barge_in: false,
+            cross_barge_in: false,
+            mute_inbound: false,
+            mute_outbound: false,
+            backlog_jump_secs: 0,
             mode: "both".into(),
             vad_rms: 250.0,
             silence_ms: 450,
             max_utterance_ms: 8000,
+            queue_limit: 32,
+            voice_mode: "auto".into(),
+            ptt_key: "F7".into(),
+            ptt_ctrl: true,
+            ptt_alt: true,
+            passthrough: false,
+            passthrough_gain: 1.0,
+            echo_guard: false,
+            monitor_translation: false,
+            monitor_device: String::new(),
         }
     }
 }
@@ -202,6 +267,13 @@ impl Default for DspConfig {
             vad: "silero".into(),
             agc: true,
             duck: true,
+            aec: true,
+            aec_filter_ms: 300,
+            onnx_provider: "cpu".into(),
+            vad_threads: 1,
+            neural_aec: false,
+            neural_aec_delay_ms: 0,
+            neural_aec_model: String::new(),
             vad_model: default_models_dir()
                 .join("silero_vad_v5.onnx")
                 .display()
@@ -216,6 +288,8 @@ impl Default for UiConfig {
             subtitles: false,
             transcript_path: String::new(),
             record_dir: String::new(),
+            keep_translation: true,
+            record_source: false,
             record_max_mb: 2048,
         }
     }
@@ -315,6 +389,9 @@ voice_reverse = "en-US-AriaNeural"    # 出向音色
 model = "gpt-4o-mini-tts"
 api_key_env = "OPENAI_API_KEY"
 rate = "+0%"
+model_dir = ""                 # 本地 TTS 模型目录（空=数据目录/models/tts）
+onnx_provider = "cpu"          # 本地 ONNX provider（DirectML 需自定义构建）
+threads = 2                    # 本地 TTS 线程数
 
 [audio]
 input = "loopback"             # loopback | pid | mic
@@ -326,20 +403,43 @@ remote_output_device = ""      # 对方听到的译文，如 "CABLE"
 duplex = false                 # true = 双向同传
 mode = "both"                  # both | listen | speak
 barge_in = false               # 自动打断（实验性，默认关闭）
+cross_barge_in = false         # 跨方向打断：对方说话也停另一方向译文
+mute_inbound = false           # 静音入向译文
+mute_outbound = false          # 静音出向译文
+backlog_jump_secs = 0          # 积压超过 N 秒跳至最新（0=不跳，字幕保留）
 vad_rms = 250
 silence_ms = 450
 max_utterance_ms = 8000
+queue_limit = 32               # 待翻译/TTS 队列上限（句）
+voice_mode = "auto"            # auto | toggle(按一下开始/再按结束) | hold(按住) | hold_translate(按住翻译，空闲原声直通)
+ptt_key = "F7"                 # 手动模式按键
+ptt_ctrl = true                # 需要 Ctrl
+ptt_alt = true                 # 需要 Alt
+passthrough = false            # 原声直通到虚拟麦克风
+passthrough_gain = 1.0         # 直通增益（0.1-4.0）
+echo_guard = false             # 朗读译文时暂停出向识别（外放防回环）
+monitor_translation = false    # 译文同时回放给自己
+monitor_device = ""            # 监听设备（空=用入向输出设备）
 
 [dsp]
 denoise = true                 # RNNoise 降噪（48k 源）
 vad = "silero"                 # silero | energy
 agc = true                     # 麦克风自动增益
 duck = true                    # 朗读时压低其他应用音量
+aec = true                     # 回声消除（用输出设备回环作参考）
+aec_filter_ms = 300            # AEC 自适应滤波器长度（毫秒）
+onnx_provider = "cpu"          # 本地 ONNX provider（DirectML 需自定义构建）
+vad_threads = 1                # Silero VAD 线程数
+neural_aec = false             # 神经 AEC（DEC baseline ONNX，替代 Speex）
+neural_aec_delay_ms = 0        # 回环参考相对麦克风的延迟（毫秒）
+neural_aec_model = ""          # 模型路径（空=数据目录/models/aec/dec-baseline.onnx）
 
 [ui]
 subtitles = false              # 双语字幕悬浮窗
 transcript_path = ""           # 双语转写导出文件（空=不导出）
-record_dir = ""               # 录音目录（原声 WAV + 译文 MP3）
+record_dir = ""               # 录音目录（空=数据目录/recordings）
+keep_translation = true        # 保存译文音频，F6 可回放
+record_source = false          # 录制原始音频 WAV
 record_max_mb = 2048          # 录音总大小上限（MB，0=不限）
 
 [realtime]
@@ -348,6 +448,11 @@ model = "models/gemini-3.8-live"
 voice = "Puck"
 voice_reverse = "Puck"
 output_device = ""
+
+[profiles]
+# 前台进程 → 配置文件（simulvoice watch 使用）
+# "Teams.exe" = "profiles/teams.toml"
+# "game.exe"  = "profiles/game.toml"
 "#;
 
 
@@ -377,7 +482,7 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     match name {
         "teams" => {
             cfg.audio.duplex = true;
-            cfg.audio.remote_output_device = "CABLE".into();
+            cfg.audio.remote_output_device = String::new();
             cfg.audio.output_device = String::new();
             cfg.stt.language = "en".into();
             cfg.stt.language_reverse = "zh".into();
@@ -406,6 +511,21 @@ pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

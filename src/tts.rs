@@ -62,6 +62,10 @@ pub struct SherpaTts {
 
 impl SherpaTts {
     pub fn new(model_dir: &str) -> Result<Self> {
+        Self::with_options(model_dir, "cpu", 2)
+    }
+
+    pub fn with_options(model_dir: &str, provider: &str, threads: u32) -> Result<Self> {
         use sherpa_onnx::{
             OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
         };
@@ -96,9 +100,9 @@ impl SherpaTts {
                     },
                     ..Default::default()
                 },
-                num_threads: 2,
+                num_threads: threads.max(1) as i32,
                 debug: false,
-                provider: Some("cpu".into()),
+                provider: Some(provider.to_string()),
                 ..Default::default()
             },
             max_num_sentences: 1,
@@ -153,6 +157,8 @@ pub fn split_clauses(text: &str) -> Vec<String> {
     }
     out
 }
+
+
 
 
 

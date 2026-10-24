@@ -29,19 +29,21 @@ impl GeminiLive {
         instruction: &str,
         voice: &str,
         out_device: &str,
+        inbound: bool,
     ) -> Result<Self> {
         let (tx, audio_rx) = channel::<Vec<i16>>();
         let (end_tx, end_rx) = channel::<()>();
         let (ev_tx, rx) = channel::<LiveEvent>();
-        let (key, model, instr, voice, device) = (
+        let (key, model, instr, voice, device, inbound) = (
             api_key.to_string(),
             model.to_string(),
             instruction.to_string(),
             voice.to_string(),
             out_device.to_string(),
+            inbound,
         );
         std::thread::spawn(move || {
-            if let Err(e) = worker(key, model, instr, voice, device, audio_rx, end_rx, ev_tx.clone()) {
+            if let Err(e) = worker(key, model, instr, voice, device, inbound, audio_rx, end_rx, ev_tx.clone()) {
                 let _ = ev_tx.send(LiveEvent::Error(e.to_string()));
             }
         });
@@ -68,6 +70,7 @@ fn worker(
     instruction: String,
     voice: String,
     out_device: String,
+    inbound: bool,
     audio_rx: Receiver<Vec<i16>>,
     end_rx: Receiver<()>,
     ev_tx: Sender<LiveEvent>,
@@ -94,6 +97,7 @@ fn worker(
             &ev_tx,
             &sink,
             &mut jitter,
+            inbound,
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -103,6 +107,9 @@ fn worker(
                     return Ok(());
                 }
             }
+        }
+        if inbound {
+            crate::RT_PLAYING.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         if crate::STOP.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
@@ -122,6 +129,7 @@ fn gemini_once(
     ev_tx: &Sender<LiveEvent>,
     sink: &rodio::Sink,
     jitter: &mut crate::dsp::JitterBuffer,
+    inbound: bool,
 ) -> Result<()> {
     let url = format!(
         "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={api_key}"
@@ -210,6 +218,9 @@ fn gemini_once(
                 ))
             }
         }
+        if inbound {
+            crate::RT_PLAYING.store(!sink.empty(), std::sync::atomic::Ordering::SeqCst);
+        }
         if sink.empty() {
             crate::ducking::restore();
         }
@@ -271,6 +282,7 @@ fn handle_server(
     }
     Ok(())
 }
+
 
 
 

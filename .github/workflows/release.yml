@@ -15,6 +15,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: AEC build prerequisites
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { choco install cmake -y --no-progress }
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) { choco install llvm -y --no-progress }
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build packages
@@ -26,3 +32,4 @@ jobs:
           files: |
             dist/*.zip
             dist/SimulVoiceSetup-*.exe
+

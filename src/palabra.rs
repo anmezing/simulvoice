@@ -123,6 +123,10 @@ pub struct PalabraSession {
 }
 
 impl PalabraSession {
+    pub fn audio_active(&self) -> bool {
+        self.sink.as_ref().map(|s| !s.empty()).unwrap_or(false)
+    }
+
     pub fn connect(cfg: &PalabraConfig, out_device: Option<&str>) -> Result<Self> {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let url = format!(
@@ -295,6 +299,7 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
 
 
 

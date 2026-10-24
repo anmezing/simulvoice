@@ -170,3 +170,109 @@ pub fn download_piper(lang: &str) -> Result<()> {
 
 
 
+
+/// Local ONNX speech recognition (SenseVoice, int8, zh/en/ja/ko/yue).
+pub fn download_sensevoice() -> Result<()> {
+    let url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2";
+    let base = crate::config::default_models_dir();
+    std::fs::create_dir_all(&base)?;
+    let tmp = base.join("sensevoice.tar.bz2");
+    download(url, &tmp)?;
+    let target = base.join("sensevoice");
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+    std::fs::create_dir_all(&target)?;
+    let file = File::open(&tmp)?;
+    let decoder = bzip2::read::BzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(&target)?;
+    let inner = std::fs::read_dir(&target)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow!("压缩包内未找到模型目录"))?;
+    for entry in std::fs::read_dir(&inner)? {
+        let entry = entry?;
+        std::fs::rename(entry.path(), target.join(entry.file_name()))?;
+    }
+    let _ = std::fs::remove_dir(inner);
+    let _ = std::fs::remove_file(&tmp);
+    println!("SenseVoice 模型已就绪: {}", target.display());
+    Ok(())
+}
+
+
+/// Streaming Zipformer (bilingual zh/en, ONNX) for low-latency ASR.
+pub fn download_zipformer() -> Result<()> {
+    let url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2";
+    let base = crate::config::default_models_dir();
+    std::fs::create_dir_all(&base)?;
+    let tmp = base.join("zipformer.tar.bz2");
+    download(url, &tmp)?;
+    let target = base.join("zipformer");
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+    std::fs::create_dir_all(&target)?;
+    let file = File::open(&tmp)?;
+    let decoder = bzip2::read::BzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(&target)?;
+    let inner = std::fs::read_dir(&target)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow!("压缩包内未找到模型目录"))?;
+    for entry in std::fs::read_dir(&inner)? {
+        let entry = entry?;
+        std::fs::rename(entry.path(), target.join(entry.file_name()))?;
+    }
+    let _ = std::fs::remove_dir(inner);
+    let _ = std::fs::remove_file(&tmp);
+    println!("Zipformer 模型已就绪: {}", target.display());
+    Ok(())
+}
+
+
+/// Optional offline MarianNMT (zh<->en) int8 ONNX models.
+pub fn download_marian() -> Result<()> {
+    let base = crate::config::default_models_dir().join("marian");
+    for (pair, repo) in [("zh-en", "Xenova/opus-mt-zh-en"), ("en-zh", "Xenova/opus-mt-en-zh")] {
+        let dir = base.join(pair);
+        std::fs::create_dir_all(&dir)?;
+        for (remote, local) in [
+            ("onnx/encoder_model_int8.onnx", "encoder_model_int8.onnx"),
+            ("onnx/decoder_model_int8.onnx", "decoder_model_int8.onnx"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+        ] {
+            let dest = dir.join(local);
+            if dest.exists() {
+                continue;
+            }
+            let url = format!("https://huggingface.co/{repo}/resolve/main/{remote}");
+            download(&url, &dest)?;
+        }
+        println!("Marian {pair} 已就绪: {}", dir.display());
+    }
+    Ok(())
+}
+
+
+
+/// Optional neural AEC model (ICASSP 2022 DEC baseline, 5 MB).
+pub fn download_aec() -> Result<()> {
+    let url = "https://raw.githubusercontent.com/PINTO0309/onnx-aec/main/dec-baseline-model-icassp2022.onnx";
+    let dir = crate::config::default_models_dir().join("aec");
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join("dec-baseline.onnx");
+    if dest.exists() {
+        println!("AEC 模型已存在: {}", dest.display());
+        return Ok(());
+    }
+    download(url, &dest)?;
+    println!("AEC 模型已就绪: {}", dest.display());
+    Ok(())
+}
+

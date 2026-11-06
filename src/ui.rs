@@ -607,6 +607,8 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                 // SIMULVOICE_UI_ADVANCED=1：截图检查时默认展开
                 show_advanced: std::env::var("SIMULVOICE_UI_ADVANCED").is_ok(),
                 hwnd_registered: false,
+                update: Arc::new(Mutex::new(UpdateState::Idle)),
+                update_scheduled: false,
             };
             app.auto_pick_meeting();
             Ok(Box::new(app))
@@ -616,6 +618,17 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
     #[cfg(windows)]
     crate::tray::shutdown();
     result
+}
+
+/// 用默认浏览器打开网址（只接受 https，避免把别的东西交给 explorer 执行）
+fn open_url(url: &str) {
+    if !url.starts_with("https://") {
+        eprintln!("[ui] 拒绝打开非 https 链接: {url}");
+        return;
+    }
+    if let Err(e) = std::process::Command::new("explorer").arg(url).spawn() {
+        eprintln!("[ui] 打开链接失败: {e}");
+    }
 }
 
 /// 绿色对勾 + 一行说明。勾是画出来的：内置字体（微软雅黑 + egui 默认字体）里没有 ✓，会显示成方框
@@ -632,6 +645,16 @@ fn ok_line(ui: &mut egui::Ui, text: &str) {
         ui.painter().add(egui::Shape::line(pts, Stroke::new(1.7, OK_GREEN)));
         ui.label(RichText::new(text).size(12.0).color(OK_GREEN));
     });
+}
+
+/// 检查更新的进度（后台线程写，界面读）
+#[derive(Clone)]
+enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(crate::update::Release),
+    Failed(String),
 }
 
 struct SettingsApp {
@@ -652,6 +675,9 @@ struct SettingsApp {
     show_advanced: bool,
     /// 主窗口句柄已登记给托盘
     hwnd_registered: bool,
+    update: Arc<Mutex<UpdateState>>,
+    /// 本次启动的自动检查已经安排过
+    update_scheduled: bool,
 }
 
 /// 开发用：设 SIMULVOICE_UI_SNAPSHOT=<文件.bmp>，窗口启动若干秒后（SIMULVOICE_UI_SNAPSHOT_DELAY，
@@ -1080,6 +1106,99 @@ impl SettingsApp {
         });
     }
 
+    /// 后台查一次新版本。manual=false（启动时自动查）失败或已是最新都不打扰用户
+    fn check_update(&self, ctx: &egui::Context, manual: bool) {
+        if let Ok(mut g) = self.update.lock() {
+            if matches!(*g, UpdateState::Checking) {
+                return;
+            }
+            *g = UpdateState::Checking;
+        }
+        let state = self.update.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::update::check();
+            crate::update::mark_checked();
+            let next = match result {
+                Ok(Some(r)) => UpdateState::Available(r),
+                Ok(None) if manual => UpdateState::UpToDate,
+                Err(e) if manual => UpdateState::Failed(e.to_string()),
+                Err(e) => {
+                    eprintln!("[更新] 自动检查失败: {e}");
+                    UpdateState::Idle
+                }
+                Ok(None) => UpdateState::Idle,
+            };
+            if let Ok(mut g) = state.lock() {
+                *g = next;
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// 有新版本时在标题下面提示一条
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let state = self.update.lock().map(|g| g.clone()).unwrap_or(UpdateState::Idle);
+        let UpdateState::Available(rel) = state else {
+            return;
+        };
+        let mut dismiss = false;
+        egui::Frame::none()
+            .fill(TILE)
+            .rounding(TILE_R)
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.horizontal(|ui| {
+                    ui.label(bold(format!("有新版本 {}", rel.version), 13.5).color(TEXT));
+                    ui.label(RichText::new(format!("当前 {}", crate::update::CURRENT)).size(12.0).color(MUTED));
+                });
+                ui.horizontal(|ui| {
+                    if ui.add(pill_button(bold("下载新版", 12.5).color(Color32::WHITE), INK)).clicked() {
+                        open_url(&rel.download);
+                    }
+                    if ui.add(pill_button(RichText::new("更新说明").size(12.5).color(TEXT), CARD)).clicked() {
+                        open_url(&rel.page);
+                    }
+                    if ui.add(pill_button(RichText::new("以后再说").size(12.5).color(MUTED), TILE)).clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+        if dismiss {
+            if let Ok(mut g) = self.update.lock() {
+                *g = UpdateState::Idle;
+            }
+        }
+    }
+
+    fn version_card(&mut self, ui: &mut egui::Ui) {
+        let state = self.update.lock().map(|g| g.clone()).unwrap_or(UpdateState::Idle);
+        card(ui, "版本", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("SimulVoice {}", crate::update::CURRENT)).size(13.0).color(TEXT));
+                let checking = matches!(state, UpdateState::Checking);
+                let label = if checking { "正在检查…" } else { "检查更新" };
+                let btn = pill_button(RichText::new(label).size(12.5).color(TEXT), CARD);
+                if ui.add_enabled(!checking, btn).clicked() {
+                    self.check_update(ui.ctx(), true);
+                }
+            });
+            match &state {
+                UpdateState::UpToDate => ok_line(ui, "已是最新版本"),
+                UpdateState::Available(r) => {
+                    ui.label(RichText::new(format!("有新版本 {}，在窗口顶部可以下载", r.version)).size(12.0).color(OK_GREEN));
+                }
+                UpdateState::Failed(e) => {
+                    ui.label(RichText::new(format!("检查失败：{e}")).size(12.0).color(DANGER));
+                }
+                UpdateState::Idle | UpdateState::Checking => {}
+            }
+            ui.checkbox(&mut self.cfg.ui.check_updates, "打开时自动检查（每天最多一次）");
+        });
+    }
+
     fn summary(&self, ui: &mut egui::Ui) {
         let source = if self.cfg.audio.input == "pid" && !self.cfg.audio.process.is_empty() {
             meeting_label(&self.cfg.audio.process)
@@ -1401,6 +1520,7 @@ impl SettingsApp {
                     .color(MUTED),
             );
         });
+        self.version_card(ui);
         card(ui, "数据", |ui| {
             ui.label(RichText::new(format!("模型与录音保存在 {}", crate::paths::data_dir().display())).size(12.0).color(MUTED));
             ui.horizontal(|ui| {
@@ -1448,6 +1568,14 @@ impl eframe::App for SettingsApp {
         }
         #[cfg(not(windows))]
         let _ = frame;
+        // SIMULVOICE_UPDATE_JSON（开发用假数据）时不受每天一次和截图模式的限制
+        let fake_update = std::env::var("SIMULVOICE_UPDATE_JSON").is_ok();
+        if !std::mem::replace(&mut self.update_scheduled, true)
+            && self.cfg.ui.check_updates
+            && (fake_update || (self.snapshot.is_none() && crate::update::auto_due()))
+        {
+            self.check_update(ctx, false);
+        }
         if let Some(snap) = &mut self.snapshot {
             if snap.tick(ctx) {
                 crate::STOP.store(true, Ordering::SeqCst);
@@ -1481,6 +1609,7 @@ impl eframe::App for SettingsApp {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 10.0;
                             self.header(ui, phase);
+                            self.update_banner(ui);
                             if locked {
                                 // 翻译进行中：设置收成一行，把空间留给字幕
                                 self.summary(ui);

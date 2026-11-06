@@ -190,6 +190,8 @@ pub struct UiConfig {
     pub record_max_mb: u64,
     /// 最小化时收到托盘（任务栏不再占位，点托盘图标恢复）
     pub minimize_to_tray: bool,
+    /// 启动时自动检查新版本（每天最多一次）
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -321,6 +323,7 @@ impl Default for UiConfig {
             record_source: false,
             record_max_mb: 2048,
             minimize_to_tray: true,
+            check_updates: true,
         }
     }
 }
@@ -614,6 +617,7 @@ keep_translation = true        # 保存译文音频，F6 可回放
 record_source = false          # 录制原始音频 WAV
 record_max_mb = 2048          # 录音总大小上限（MB，0=不限）
 minimize_to_tray = true        # 最小化时收到托盘
+check_updates = true           # 启动时自动检查新版本（每天最多一次）
 
 [realtime]
 provider = "none"              # none | gemini-live（端到端语音翻译）

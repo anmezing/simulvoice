@@ -28,6 +28,7 @@ mod stt;
 mod translate;
 mod tray;
 mod tts;
+mod update;
 mod ui;
 mod vad;
 mod volc;

@@ -54,60 +54,6 @@ lto = "thin"
 strip = true
 codegen-units = 1
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+[patch.crates-io]
+# speexdsp 改用 smallft，避免与 sherpa-onnx 的 kissfft 同名函数冲突（见 third_party/aec-rs-sys/speexdsp/CMakeLists.txt）
+aec-rs-sys = { path = "third_party/aec-rs-sys" }

@@ -126,8 +126,6 @@ dependencies = [
 [[package]]
 name = "aec-rs-sys"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae9a6febcaa759f69f5de10de33a7b005af57d476f7e33e0b4f7cabb0d1e67f"
 dependencies = [
  "bindgen 0.69.5",
  "cmake",

@@ -92,6 +92,25 @@ mod tests {
         assert!(out_rms < echo_rms * 0.5, "echo not reduced enough: {echo_rms} -> {out_rms}");
     }
 
+    /// 压力测试：响亮、与参考无关的麦克风信号（真实会议里常见），会让 speex 判定"发散"并重置
+    #[test]
+    fn survives_divergence_and_drop() {
+        let mut seed = 7u64;
+        for round in 0..20 {
+            let mut aec = AecProcessor::new(300);
+            for _ in 0..400 {
+                let r: Vec<i16> = (0..480).map(|_| noise(&mut seed)).collect();
+                let m: Vec<i16> = (0..480).map(|_| noise(&mut seed)).collect();
+                aec.push_reference(&r);
+                let out = aec.process(&m);
+                assert_eq!(out.len(), 480);
+            }
+            drop(aec);
+            let v: Vec<Vec<u8>> = (0..200).map(|i| vec![round as u8; 1000 + i]).collect();
+            assert_eq!(v.len(), 200);
+        }
+    }
+
     fn rms(samples: &[i16]) -> f64 {
         if samples.is_empty() {
             return 0.0;

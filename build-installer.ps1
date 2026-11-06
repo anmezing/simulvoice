@@ -22,7 +22,7 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item "target\release\simulvoice.exe" $stage
 if (Test-Path "target\release\onnxruntime_marian.dll") { Copy-Item "target\release\onnxruntime_marian.dll" $stage }
 Copy-Item "README.md" $stage
-Copy-Item "README.zh-CN.md" $stage
+Copy-Item "README.en.md" $stage
 Copy-Item "LICENSE" "$stage\LICENSE.txt"
 & "target\release\simulvoice.exe" write-icon "$stage\simulvoice.ico"
 if ($LASTEXITCODE -ne 0) { throw "write-icon failed" }

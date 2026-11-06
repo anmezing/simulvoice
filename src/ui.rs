@@ -1204,7 +1204,7 @@ impl SettingsApp {
                         .sense(egui::Sense::click()),
                 );
                 if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    open_url(&format!("{}#license", crate::update::REPO_URL));
+                    open_url(&format!("{}#许可与授权", crate::update::REPO_URL));
                 }
             });
         });

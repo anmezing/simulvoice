@@ -852,6 +852,7 @@ fn run_cli() -> Result<()> {
             Some(other) => Err(anyhow!("未知模型类型: {other}")),
         },
         Some("vadcheck") => vad_check(&args),
+        Some("capturetest") => capture_test(&args),
         Some("livetest") => livetest::run(&args),
         Some("multitest") => {
             let cfg = Config::load(flag(&args, "--config").as_deref())?;
@@ -1049,6 +1050,51 @@ fn say(args: &[String]) -> Result<()> {
         return Ok(());
     }
     sink::play_mp3(mp3, None)
+}
+
+/// 诊断：只打开采集，每秒打印一次音量，不识别不翻译，也不占单实例锁。
+/// `capturetest [--process 名字.exe | --pid N | --mic [设备]] [--seconds S]`，缺省收整个电脑的声音
+fn capture_test(args: &[String]) -> Result<()> {
+    let secs = flag(args, "--seconds").and_then(|s| s.parse::<u64>().ok()).unwrap_or(10).clamp(1, 600);
+    let source = if let Some(name) = flag(args, "--process") {
+        let pid = capture::find_pid(&name).ok_or_else(|| anyhow!("没找到带窗口的进程 {name}"))?;
+        println!("[采集] {name} → 进程 {pid}（含子进程）");
+        capture::Source::Loopback(Some(pid))
+    } else if let Some(pid) = flag(args, "--pid").and_then(|s| s.parse::<u32>().ok()) {
+        println!("[采集] 进程 {pid}（含子进程）");
+        capture::Source::Loopback(Some(pid))
+    } else if args.iter().any(|a| a == "--mic") {
+        let dev = flag(args, "--mic").filter(|d| !d.starts_with("--"));
+        println!("[采集] 麦克风 {}", dev.as_deref().unwrap_or("（默认）"));
+        capture::Source::Mic(dev)
+    } else {
+        println!("[采集] 整个电脑的声音");
+        capture::Source::Loopback(None)
+    };
+    let cap = capture::open(source, false, false)?;
+    println!("[采集] 已打开，{} Hz；以下每秒一行：样本数 / 音量(RMS)", cap.sample_rate);
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    let mut tick = std::time::Instant::now();
+    let (mut n, mut sum) = (0usize, 0f64);
+    while std::time::Instant::now() < end {
+        match cap.rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(chunk) => {
+                n += chunk.len();
+                sum += chunk.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => return Err(anyhow!("采集线程已退出")),
+        }
+        if tick.elapsed() >= Duration::from_secs(1) {
+            let rms = if n > 0 { (sum / n as f64).sqrt() } else { 0.0 };
+            println!("  {n:>7} / {rms:>7.1}{}", if n == 0 { "  （没有声音数据）" } else { "" });
+            tick = std::time::Instant::now();
+            n = 0;
+            sum = 0.0;
+        }
+    }
+    STOP.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 fn transcribe_file(args: &[String]) -> Result<()> {

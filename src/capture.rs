@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
-use wasapi::{get_default_device, initialize_mta, AudioClient, Direction, SampleType, StreamMode};
+use wasapi::{get_default_device, initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 
 use crate::dsp::{downmix, Agc, StreamResampler};
 
@@ -99,7 +99,14 @@ fn run_capture(
         },
     };
 
-    let fmt = client.get_mixformat()?;
+    // 按进程收音（只收某个软件的声音）时 Windows 不提供混音格式（GetMixFormat 返回
+    // E_NOTIMPL "尚未实现"），只能自己指定格式、靠 autoconvert 转换，并且要用事件模式读取。
+    let process_loopback = matches!(source, Source::Loopback(Some(_)));
+    let fmt = if process_loopback {
+        WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None)
+    } else {
+        client.get_mixformat()?
+    };
     let rate = fmt.get_samplespersec();
     let ch = fmt.get_nchannels() as usize;
     let bits = fmt.get_bitspersample() as usize;
@@ -116,14 +123,23 @@ fn run_capture(
         },
     };
 
-    client.initialize_client(
-        &fmt,
-        &Direction::Capture,
-        &StreamMode::PollingShared {
+    let mode = if process_loopback {
+        StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: 0,
+        }
+    } else {
+        StreamMode::PollingShared {
             autoconvert: true,
             buffer_duration_hns: 100_000,
-        },
-    )?;
+        }
+    };
+    client.initialize_client(&fmt, &Direction::Capture, &mode)?;
+    let event = if process_loopback {
+        Some(client.set_get_eventhandle()?)
+    } else {
+        None
+    };
     client.start_stream()?;
     let cap = client.get_audiocaptureclient()?;
 
@@ -170,7 +186,13 @@ fn run_capture(
         }
         let frames = dq.len() / frame_bytes;
         if frames == 0 {
-            thread::sleep(Duration::from_millis(3));
+            match &event {
+                // 软件没在出声时不会有事件，超时属正常：回到循环顶部，顺便检查 STOP
+                Some(h) => {
+                    let _ = h.wait_for_event(200);
+                }
+                None => thread::sleep(Duration::from_millis(3)),
+            }
             continue;
         }
 
@@ -356,8 +378,58 @@ pub fn find_pid(exe: &str) -> Option<u32> {
     if want.is_empty() {
         return None;
     }
-    list_window_processes()
+    let pid = list_window_processes()
         .into_iter()
         .find(|(_, name, _)| name.eq_ignore_ascii_case(want))
-        .map(|(pid, _, _)| pid)
+        .map(|(pid, _, _)| pid)?;
+    Some(topmost_same_exe(pid))
+}
+
+/// 会议软件常拆成好几个同名进程（腾讯会议有十几个），出声的不一定是窗口所在的那个。
+/// 往上找到同名的最顶层进程，按进程收音时连同整棵子进程树一起收，才不会漏掉。
+#[cfg(windows)]
+fn topmost_same_exe(pid: u32) -> u32 {
+    use std::collections::HashMap;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    // pid -> (父 pid, 可执行文件名)
+    let mut procs: HashMap<u32, (u32, String)> = HashMap::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return pid;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name = String::from_utf16_lossy(&e.szExeFile[..len]);
+            procs.insert(e.th32ProcessID, (e.th32ParentProcessID, name));
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    let Some((_, exe)) = procs.get(&pid).cloned() else {
+        return pid;
+    };
+    let mut cur = pid;
+    // 上限防止父子关系成环（PID 复用时可能出现）
+    for _ in 0..16 {
+        match procs.get(&cur) {
+            Some((parent, _)) if *parent != cur => match procs.get(parent) {
+                Some((_, name)) if name.eq_ignore_ascii_case(&exe) => cur = *parent,
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    cur
+}
+
+#[cfg(not(windows))]
+fn topmost_same_exe(pid: u32) -> u32 {
+    pid
 }

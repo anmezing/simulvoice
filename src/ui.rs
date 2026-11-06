@@ -1011,10 +1011,11 @@ impl SettingsApp {
                     self.cfg.audio.mode = "both".into();
                 }
             });
+            let to_me = if self.cfg.audio.mute_inbound { "字幕给你看" } else { "念给你" };
             let desc = if self.cfg.audio.duplex {
-                format!("对方的{theirs}译成{mine}念给你，你说的{mine}译成{theirs}送给对方")
+                format!("对方的{theirs}译成{mine}{to_me}，你说的{mine}译成{theirs}送给对方")
             } else {
-                format!("对方说的{theirs}实时译成{mine}念给你听")
+                format!("对方说的{theirs}实时译成{mine}{to_me}")
             };
             ui.label(RichText::new(desc).size(12.0).color(MUTED));
             if self.cfg.audio.duplex {
@@ -1034,6 +1035,22 @@ impl SettingsApp {
                     ),
                 }
             }
+            ui.add_space(6.0);
+            ui.label(bold("你听到的", 13.0).color(TEXT));
+            ui.add_enabled_ui(!locked, |ui| {
+                let sel = if self.cfg.audio.mute_inbound { 1 } else { 0 };
+                if let Some(i) = segmented(ui, "hear", sel, &["原声 + 译文", "只听原声"]) {
+                    self.cfg.audio.mute_inbound = i == 1;
+                }
+            });
+            let hear = if self.cfg.audio.mute_inbound {
+                "不念译文，会议声音照常，译文只在下方字幕里显示".to_string()
+            } else if self.cfg.dsp.duck {
+                "会议声音照常播放；念译文时会议声音自动调小，念完恢复".to_string()
+            } else {
+                "会议声音和译文同时播放（「高级设置」里可开启念译文时调小会议声音）".to_string()
+            };
+            ui.label(RichText::new(hear).size(12.0).color(MUTED));
         });
     }
 

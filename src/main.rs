@@ -799,6 +799,8 @@ fn run_cli() -> Result<()> {
     // 放在日志重定向之后：上次崩溃的提示要写进 simulvoice.log
     #[cfg(windows)]
     crashdump::install();
+    // 上次崩溃时被调低、没来得及恢复的应用音量
+    ducking::recover();
     match args.first().map(String::as_str) {
         Some("say") => say(&args),
         Some("translate") => translate_once(&args),
@@ -1056,6 +1058,11 @@ fn say(args: &[String]) -> Result<()> {
 /// `capturetest [--process 名字.exe | --pid N | --mic [设备]] [--seconds S]`，缺省收整个电脑的声音
 fn capture_test(args: &[String]) -> Result<()> {
     let secs = flag(args, "--seconds").and_then(|s| s.parse::<u64>().ok()).unwrap_or(10).clamp(1, 600);
+    // --duck-after N：N 秒后开始"念译文时调低其他声音"（再过 3 秒恢复），检验采集端的音量补偿
+    let duck_after = flag(args, "--duck-after").and_then(|s| s.parse::<u64>().ok());
+    if duck_after.is_some() {
+        ducking::init(0.35);
+    }
     let source = if let Some(name) = flag(args, "--process") {
         let pid = capture::find_pid(&name).ok_or_else(|| anyhow!("没找到带窗口的进程 {name}"))?;
         println!("[采集] {name} → 进程 {pid}（含子进程）");
@@ -1073,6 +1080,8 @@ fn capture_test(args: &[String]) -> Result<()> {
     };
     let cap = capture::open(source, false, false)?;
     println!("[采集] 已打开，{} Hz；以下每秒一行：样本数 / 音量(RMS)", cap.sample_rate);
+    let started = std::time::Instant::now();
+    let mut duck_state = 0u8; // 0 未开始 1 调低中 2 已恢复
     let end = std::time::Instant::now() + Duration::from_secs(secs);
     let mut tick = std::time::Instant::now();
     let (mut n, mut sum) = (0usize, 0f64);
@@ -1084,6 +1093,18 @@ fn capture_test(args: &[String]) -> Result<()> {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => return Err(anyhow!("采集线程已退出")),
+        }
+        if let Some(after) = duck_after {
+            let t = started.elapsed();
+            if duck_state == 0 && t >= Duration::from_secs(after) {
+                println!("  —— 调低其他声音 ——");
+                ducking::duck();
+                duck_state = 1;
+            } else if duck_state == 1 && t >= Duration::from_secs(after + 3) {
+                println!("  —— 恢复 ——");
+                ducking::restore();
+                duck_state = 2;
+            }
         }
         if tick.elapsed() >= Duration::from_secs(1) {
             let rms = if n > 0 { (sum / n as f64).sqrt() } else { 0.0 };
@@ -1565,7 +1586,10 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
                     g.push_history(p.outbound, text.clone(), translated.clone());
                 }
             }
-            if speech_tx.send(translated.clone()).is_err() {
+            if !p.outbound && MUTE_IN.load(Ordering::SeqCst) {
+                // 收听方式 = 只听原声：只出字幕，不念
+                backlog_done();
+            } else if speech_tx.send(translated.clone()).is_err() {
                 break;
             }
             let mut extra_out = Vec::new();
@@ -2599,6 +2623,10 @@ pub(crate) fn run_session(
         ),
     }
     DUCK.store(cfg.dsp.duck, Ordering::SeqCst);
+    if cfg.dsp.duck {
+        // 念译文时其他声音（含会议原声）调到约 1/3
+        ducking::init(0.35);
+    }
     ECHO_GUARD.store(cfg.audio.echo_guard, Ordering::SeqCst);
     AEC_ON.store(cfg.dsp.aec, Ordering::SeqCst);
     let _ = ONNX_PROVIDER.set(cfg.dsp.onnx_provider.clone());

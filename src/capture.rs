@@ -102,6 +102,12 @@ fn run_capture(
     // 按进程收音（只收某个软件的声音）时 Windows 不提供混音格式（GetMixFormat 返回
     // E_NOTIMPL "尚未实现"），只能自己指定格式、靠 autoconvert 转换，并且要用事件模式读取。
     let process_loopback = matches!(source, Source::Loopback(Some(_)));
+    // 念译文时会议软件会被调低（ducking），按进程收到的声音也跟着变小，要放大回来
+    #[cfg(windows)]
+    let duck_tree = match source {
+        Source::Loopback(Some(p)) => process_tree(*p),
+        _ => std::collections::HashSet::new(),
+    };
     let fmt = if process_loopback {
         WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None)
     } else {
@@ -232,6 +238,15 @@ fn run_capture(
         }
 
         let mut mono = downmix(&inter, ch);
+        #[cfg(windows)]
+        if !duck_tree.is_empty() {
+            let gain = crate::ducking::capture_gain(&duck_tree);
+            if gain != 1.0 {
+                for s in mono.iter_mut() {
+                    *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                }
+            }
+        }
         if let Some(r) = to48.as_mut() {
             mono = r.process(&mono);
         }
@@ -387,19 +402,18 @@ pub fn find_pid(exe: &str) -> Option<u32> {
 
 /// 会议软件常拆成好几个同名进程（腾讯会议有十几个），出声的不一定是窗口所在的那个。
 /// 往上找到同名的最顶层进程，按进程收音时连同整棵子进程树一起收，才不会漏掉。
+/// 当前所有进程：pid -> (父 pid, 可执行文件名)
 #[cfg(windows)]
-fn topmost_same_exe(pid: u32) -> u32 {
-    use std::collections::HashMap;
+pub fn process_table() -> std::collections::HashMap<u32, (u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
-    // pid -> (父 pid, 可执行文件名)
-    let mut procs: HashMap<u32, (u32, String)> = HashMap::new();
+    let mut procs = std::collections::HashMap::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
-            return pid;
+            return procs;
         }
         let mut e: PROCESSENTRY32W = std::mem::zeroed();
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -412,6 +426,32 @@ fn topmost_same_exe(pid: u32) -> u32 {
         }
         CloseHandle(snap);
     }
+    procs
+}
+
+/// root 及其所有子孙进程
+#[cfg(windows)]
+pub fn process_tree(root: u32) -> std::collections::HashSet<u32> {
+    let procs = process_table();
+    let mut tree = std::collections::HashSet::from([root]);
+    // 逐层扩展；上限防止父子关系成环
+    for _ in 0..16 {
+        let before = tree.len();
+        for (pid, (parent, _)) in &procs {
+            if *pid != *parent && tree.contains(parent) {
+                tree.insert(*pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+    tree
+}
+
+#[cfg(windows)]
+fn topmost_same_exe(pid: u32) -> u32 {
+    let procs = process_table();
     let Some((_, exe)) = procs.get(&pid).cloned() else {
         return pid;
     };

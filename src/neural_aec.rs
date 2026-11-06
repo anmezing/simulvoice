@@ -29,7 +29,7 @@ impl NeuralAec {
                 "神经 AEC 模型不存在: {model_path}（运行 models aec）"
             ));
         }
-        let env = crate::marian::ort_env()?;
+        let env = crate::nmt::ort_env()?;
         let session = Session::builder(env)?.commit_from_file(model_path)?;
         let mut planner = RealFftPlanner::<f32>::new();
         let fwd = planner.plan_fft_forward(FRAME);

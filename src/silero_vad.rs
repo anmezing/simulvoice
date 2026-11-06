@@ -48,7 +48,8 @@ impl SileroVad {
             speaking: false,
             fed_samples: 0,
             max_samples: (max_utterance_ms as usize * 16) as usize,
-            preroll: PreRoll::new(8),
+            // 0.6 秒：覆盖 Silero 确认语音所需的 min_speech_duration(0.15s) + 判定窗口延迟，留足余量
+            preroll: PreRoll::with_samples(16_000 * 6 / 10),
         })
     }
 
@@ -67,7 +68,6 @@ impl SileroVad {
             }
         }
         if self.speaking {
-            self.preroll.push(samples.to_vec());
             events.push(VadEvent::Feed(samples.to_vec()));
             self.fed_samples += samples.len();
         } else {

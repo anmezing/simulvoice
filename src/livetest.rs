@@ -39,6 +39,12 @@ pub fn run(args: &[String]) -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow!("用法: livetest <音频文件> [--config <文件>]"))?;
     let cfg = Config::load(flag(args, "--config").as_deref())?;
+    if cfg.realtime.provider != "gemini-live" {
+        return Err(anyhow!(
+            "livetest 只测 gemini-live，当前 realtime.provider={}；火山用 volctest、Palabra 用 palabratest",
+            cfg.realtime.provider
+        ));
+    }
     let key = std::env::var("GEMINI_API_KEY")
         .map_err(|_| anyhow!("GEMINI_API_KEY 未设置（keys.toml 或环境变量）"))?;
     let instruction = format!(

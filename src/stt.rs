@@ -96,12 +96,120 @@ impl SttEngine {
 
 // ───────────────────────────── Soniox (cloud streaming) ─────────────────────────────
 
+/// 离线整句识别（SenseVoice / Whisper）：VAD 切出一句后一次性解码。
 pub struct SherpaStt {
     recognizer: sherpa_onnx::OfflineRecognizer,
     buffer: Vec<i16>,
+    /// Whisper 在静音/噪声上会"脑补"固定套话，需要过滤
+    whisper: bool,
+}
+
+fn onnx_provider() -> String {
+    crate::ONNX_PROVIDER
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "cpu".into())
+}
+
+/// 识别线程数：两路同传各占一份，留出核给翻译与 VAD。
+fn asr_threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 4).clamp(2, 4) as i32)
+        .unwrap_or(2)
+}
+
+pub fn sensevoice_dir() -> std::path::PathBuf {
+    crate::config::default_models_dir().join("sensevoice")
+}
+
+pub fn whisper_dir() -> std::path::PathBuf {
+    crate::config::default_models_dir().join("whisper")
+}
+
+pub fn sensevoice_ready() -> bool {
+    let d = sensevoice_dir();
+    d.join("tokens.txt").exists()
+        && (d.join("model.int8.onnx").exists() || d.join("model.onnx").exists())
+}
+
+/// Whisper 目录里的 (encoder, decoder, tokens)，优先 int8。
+fn whisper_files(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    let pick = |part: &str| -> Option<std::path::PathBuf> {
+        let mut c: Vec<&String> = names
+            .iter()
+            .filter(|n| n.ends_with(".onnx") && n.contains(&format!("-{part}")))
+            .collect();
+        c.sort_by_key(|n| if n.contains(".int8.") { 0 } else { 1 });
+        c.first().map(|n| dir.join(n))
+    };
+    let tokens = names
+        .iter()
+        .find(|n| n.ends_with("tokens.txt"))
+        .map(|n| dir.join(n))?;
+    Some((pick("encoder")?, pick("decoder")?, tokens))
+}
+
+pub fn whisper_ready() -> bool {
+    whisper_files(&whisper_dir()).is_some()
+}
+
+/// Whisper 在非语音片段上常见的幻觉输出（训练数据里的字幕套话）。
+fn whisper_hallucination(text: &str) -> bool {
+    let t = text
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || "。，！？…「」 ".contains(c))
+        .to_lowercase();
+    const JUNK: &[&str] = &[
+        "thank you",
+        "thanks for watching",
+        "thank you for watching",
+        "please subscribe",
+        "you",
+        "bye",
+        "谢谢观看",
+        "ご視聴ありがとうございました",
+    ];
+    t.is_empty()
+        || JUNK.iter().any(|j| t == *j)
+        || (t.chars().count() < 60 && (t.contains("amara.org") || t.contains("字幕") || t.contains("sous-titr") || t.contains("untertitel")))
 }
 
 impl SherpaStt {
+    pub fn whisper(model_dir: &str, language: &str) -> Result<Self> {
+        use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineWhisperModelConfig};
+        let dir = std::path::Path::new(model_dir);
+        let (encoder, decoder, tokens) = whisper_files(dir).ok_or_else(|| {
+            anyhow!("Whisper 模型不完整: {}（先运行 simulvoice models whisper）", dir.display())
+        })?;
+        let mut config = OfflineRecognizerConfig::default();
+        config.model_config.whisper = OfflineWhisperModelConfig {
+            encoder: Some(encoder.display().to_string()),
+            decoder: Some(decoder.display().to_string()),
+            // 空 = Whisper 自动判语种；会议里语种已知，指定后更准也更快
+            language: Some(language.trim().to_string()),
+            task: Some("transcribe".into()),
+            ..Default::default()
+        };
+        config.model_config.tokens = Some(tokens.display().to_string());
+        config.model_config.num_threads = asr_threads();
+        config.model_config.provider = Some(onnx_provider());
+        config.model_config.debug = false;
+        let recognizer = OfflineRecognizer::create(&config)
+            .ok_or_else(|| anyhow!("Whisper 模型加载失败: {}", dir.display()))?;
+        Ok(Self {
+            recognizer,
+            buffer: Vec::new(),
+            whisper: true,
+        })
+    }
+
     pub fn new(model_dir: &str, language: &str) -> Result<Self> {
         use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
         let dir = std::path::Path::new(model_dir);
@@ -114,10 +222,15 @@ impl SherpaStt {
         if !tokens.exists() {
             return Err(anyhow!("SenseVoice tokens.txt 不存在: {}", dir.display()));
         }
-        let lang = match language.trim() {
-            "" | "auto" => "auto".to_string(),
-            "cn" => "zh".to_string(),
-            other => other.to_string(),
+        let lang = match crate::lang::find(language) {
+            Some(l) if l.sensevoice => l.code.to_string(),
+            Some(l) => {
+                return Err(anyhow!(
+                    "SenseVoice 不支持{}（只支持中/英/日/韩/粤），改用 stt=local 自动切 Whisper",
+                    l.label
+                ))
+            }
+            None => "auto".to_string(),
         };
         let mut config = OfflineRecognizerConfig::default();
         config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
@@ -126,19 +239,15 @@ impl SherpaStt {
             use_itn: true,
         };
         config.model_config.tokens = Some(tokens.display().to_string());
-        config.model_config.num_threads = 2;
-        config.model_config.provider = Some(
-            crate::ONNX_PROVIDER
-                .get()
-                .cloned()
-                .unwrap_or_else(|| "cpu".into()),
-        );
+        config.model_config.num_threads = asr_threads();
+        config.model_config.provider = Some(onnx_provider());
         config.model_config.debug = false;
         let recognizer = OfflineRecognizer::create(&config)
             .ok_or_else(|| anyhow!("SenseVoice 模型加载失败: {}", dir.display()))?;
         Ok(Self {
             recognizer,
             buffer: Vec::new(),
+            whisper: false,
         })
     }
 
@@ -149,13 +258,21 @@ impl SherpaStt {
             .map(|&s| s as f32 / 32768.0)
             .collect();
         self.buffer.clear();
+        // Whisper 对 <0.3 秒的碎片几乎只会输出幻觉
+        if self.whisper && samples.len() < 16_000 * 3 / 10 {
+            return Ok(String::new());
+        }
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(16_000, &samples);
         self.recognizer.decode(&stream);
-        Ok(stream
+        let text = stream
             .get_result()
             .map(|r| r.text.trim().to_string())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if self.whisper && whisper_hallucination(&text) {
+            return Ok(String::new());
+        }
+        Ok(text)
     }
 }
 
@@ -350,7 +467,11 @@ fn soniox_once(
         "sample_rate": 16000,
         "num_channels": 1,
         "enable_endpoint_detection": true,
-        "language_hints": if language == "auto" { serde_json::json!([]) } else { serde_json::json!([language]) }
+        "language_hints": if language == "auto" {
+            serde_json::json!([])
+        } else {
+            serde_json::json!(language.split(',').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>())
+        }
     });
     ws.send(Message::Text(init.to_string().into()))?;
 
@@ -661,16 +782,111 @@ fn load_vosk_library() -> Result<libloading::Library> {
 }
 // ───────────────────────────── factory ─────────────────────────────
 
+/// 本地识别按语言选模型：中英日韩粤用 SenseVoice（快、准、带标点），其余用 Whisper。
+fn build_local(language: &str) -> Result<SttEngine> {
+    let lang = crate::lang::find(language);
+    let sv = sensevoice_ready();
+    let wh = whisper_ready();
+    let sv_dir = sensevoice_dir().display().to_string();
+    let wh_dir = whisper_dir().display().to_string();
+    match lang {
+        Some(l) if l.sensevoice && sv => {
+            eprintln!("[识别] 本地 SenseVoice（{}）", l.label);
+            Ok(SttEngine::Sherpa(SherpaStt::new(&sv_dir, l.code)?))
+        }
+        Some(l) if wh => {
+            eprintln!("[识别] 本地 Whisper（{}）", l.label);
+            Ok(SttEngine::Sherpa(SherpaStt::whisper(&wh_dir, l.whisper)?))
+        }
+        Some(l) if l.sensevoice => Err(anyhow!(
+            "本地识别{}需要 SenseVoice 模型：先运行 simulvoice models sensevoice",
+            l.label
+        )),
+        Some(l) => Err(anyhow!(
+            "本地识别{}需要 Whisper 模型：先运行 simulvoice models whisper（约 640 MB）",
+            l.label
+        )),
+        None if sv => Ok(SttEngine::Sherpa(SherpaStt::new(&sv_dir, "auto")?)),
+        None if wh => Ok(SttEngine::Sherpa(SherpaStt::whisper(&wh_dir, "")?)),
+        None => Err(anyhow!("本地识别缺模型：先运行 simulvoice models sensevoice")),
+    }
+}
+
 pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
+    build_multi(cfg, None)
+}
+
+/// 对方那一路：除了对方的语言，还要能认出"我的语言"（同事插话），
+/// 因此不再把识别语言钉死，改成自动判语种。只在不换模型的前提下才开：
+/// - 两门都是 SenseVoice 语言 → SenseVoice 自动（它只在中英日韩粤里判）
+/// - 对方语言本来就走 Whisper → Whisper 自动
+/// - 对方用 SenseVoice、我的语言它不支持 → 保持原样（换 Whisper 会更慢更不准，不值得）
+///
+/// 返回的 bool 表示是否真的开了自动判语种。
+pub fn build_inbound(
+    cfg: &crate::config::SttConfig,
+    mine: &'static crate::lang::Lang,
+) -> Result<(SttEngine, bool)> {
+    let theirs = crate::lang::find(&cfg.language);
+    let Some(theirs) = theirs.filter(|t| crate::lang::distinguishable(t, mine)) else {
+        return Ok((build(cfg)?, false));
+    };
+    let auto = match cfg.provider.as_str() {
+        "local" => {
+            let sv_both = theirs.sensevoice && mine.sensevoice && sensevoice_ready();
+            let whisper_path = !(theirs.sensevoice && sensevoice_ready()) && whisper_ready();
+            sv_both || whisper_path
+        }
+        "sherpa" => theirs.sensevoice && mine.sensevoice,
+        "whisper" | "soniox" => true,
+        _ => false,
+    };
+    if !auto {
+        return Ok((build(cfg)?, false));
+    }
+    Ok((build_multi(cfg, Some(mine))?, true))
+}
+
+fn build_multi(
+    cfg: &crate::config::SttConfig,
+    also: Option<&'static crate::lang::Lang>,
+) -> Result<SttEngine> {
     Ok(match cfg.provider.as_str() {
         "none" => SttEngine::None,
+        "local" if also.is_some() => {
+            let theirs = crate::lang::find(&cfg.language);
+            let sv_dir = sensevoice_dir().display().to_string();
+            let wh_dir = whisper_dir().display().to_string();
+            if theirs.map(|t| t.sensevoice).unwrap_or(false) && sensevoice_ready() {
+                eprintln!("[识别] 本地 SenseVoice（自动判语种）");
+                SttEngine::Sherpa(SherpaStt::new(&sv_dir, "auto")?)
+            } else {
+                eprintln!("[识别] 本地 Whisper（自动判语种）");
+                SttEngine::Sherpa(SherpaStt::whisper(&wh_dir, "")?)
+            }
+        }
+        "local" => build_local(&cfg.language)?,
+        "whisper" => {
+            // model_path 是各引擎共用的旧字段（默认指向 vosk），里面没有 Whisper 文件就用默认目录
+            let path = if whisper_files(std::path::Path::new(cfg.model_path.trim())).is_none() {
+                whisper_dir().display().to_string()
+            } else {
+                cfg.model_path.clone()
+            };
+            let code = if also.is_some() {
+                ""
+            } else {
+                crate::lang::find(&cfg.language).map(|l| l.whisper).unwrap_or("")
+            };
+            SttEngine::Sherpa(SherpaStt::whisper(&path, code)?)
+        }
         "openai" => {
             let key = std::env::var(&cfg.api_key_env)
                 .map_err(|_| anyhow!("环境变量 {} 未设置", cfg.api_key_env))?;
             SttEngine::OpenAi(OpenAiStt::new(key, cfg.model.clone()))
         }
         "sherpa" => {
-            let path = if cfg.model_path.trim().is_empty() {
+            let path = if !std::path::Path::new(cfg.model_path.trim()).join("tokens.txt").exists() {
                 crate::config::default_models_dir()
                     .join("sensevoice")
                     .display()
@@ -678,7 +894,8 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
             } else {
                 cfg.model_path.clone()
             };
-            SttEngine::Sherpa(SherpaStt::new(&path, &cfg.language)?)
+            let lang = if also.is_some() { "auto" } else { cfg.language.as_str() };
+            SttEngine::Sherpa(SherpaStt::new(&path, lang)?)
         }
         "zipformer" => {
             let path = if cfg.model_path.trim().is_empty() {
@@ -705,7 +922,12 @@ pub fn build(cfg: &crate::config::SttConfig) -> Result<SttEngine> {
         _ => {
             let key = std::env::var(&cfg.api_key_env)
                 .map_err(|_| anyhow!("环境变量 {} 未设置", cfg.api_key_env))?;
-            SttEngine::Soniox(SonioxStt::new(key, cfg.language.clone())?)
+            // Soniox 本身多语种，给两门语言做提示即可
+            let hints = match also {
+                Some(m) => format!("{},{}", cfg.language.trim(), m.code),
+                None => cfg.language.clone(),
+            };
+            SttEngine::Soniox(SonioxStt::new(key, hints)?)
         }
     })
 }

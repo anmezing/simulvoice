@@ -1,8 +1,8 @@
 [Setup]
 AppId={{8F3B2E54-6C1D-4B7A-9E2F-3A5C7D1B4E60}
 AppName=SimulVoice
-AppVersion=0.36.0
-AppVerName=SimulVoice 0.36.0
+AppVersion=0.44.0
+AppVerName=SimulVoice 0.44.0
 AppPublisher=SimulVoice
 DefaultDirName={localappdata}\Programs\SimulVoice
 DefaultGroupName=SimulVoice
@@ -10,7 +10,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=dist
-OutputBaseFilename=SimulVoiceSetup-0.36.0
+OutputBaseFilename=SimulVoiceSetup-0.44.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -39,6 +39,14 @@ Name: "{autodesktop}\SimulVoice"; Filename: "{app}\simulvoice.exe"; Tasks: deskt
 
 [Run]
 Filename: "{app}\simulvoice.exe"; Description: "{cm:LaunchProgram,SimulVoice}"; Flags: nowait postinstall skipifsilent
+
+
+
+
+
+
+
+
 
 
 

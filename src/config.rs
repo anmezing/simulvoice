@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub version: u32,
+    /// 会议的两门语言。识别语言、翻译方向、朗读音色都由它推出（见 apply_languages）
+    pub languages: LanguagesConfig,
     pub stt: SttConfig,
     pub translate: TranslateConfig,
     pub tts: TtsConfig,
@@ -19,8 +21,26 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
+pub struct LanguagesConfig {
+    /// 我说的语言（入向译文的目标、出向识别的语言）
+    pub mine: String,
+    /// 对方说的语言（入向识别的语言、出向译文的目标）
+    pub theirs: String,
+}
+
+impl Default for LanguagesConfig {
+    fn default() -> Self {
+        Self {
+            mine: "zh".into(),
+            theirs: "en".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SttConfig {
-    /// soniox | openai | vosk | none
+    /// local（按语言自动选 SenseVoice/Whisper）| sherpa(SenseVoice) | whisper | zipformer | vosk | soniox | openai | none
     pub provider: String,
     pub language: String,
     /// 出向（我 → 对方）识别语言
@@ -36,7 +56,7 @@ pub struct SttConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TranslateConfig {
-    /// openai | gemini | ollama | qwen | custom | none
+    /// local（Marian/NLLB 自动选）| marian | nllb | openai | gemini | ollama | qwen | custom | none
     pub provider: String,
     pub target: String,
     /// 出向翻译目标语言
@@ -79,6 +99,8 @@ pub struct AudioConfig {
     /// 回环采集的渲染设备名（空=默认输出设备）
     pub loopback_device: String,
     pub pid: u32,
+    /// 会议软件的进程名（如 wemeetapp.exe）。PID 每次启动都会变，按名字重新找
+    pub process: String,
     /// 入向输出设备名（子串匹配），空=系统默认
     pub output_device: String,
     /// 出向采集：麦克风设备名（空 = 默认麦克风）
@@ -121,6 +143,8 @@ pub struct AudioConfig {
     pub mute_inbound: bool,
     pub mute_outbound: bool,
     pub backlog_jump_secs: u32,
+    /// 对方那一路听到"我的语言"（如中英会议里中文同事插话）时只显示原文，不翻译、不朗读
+    pub skip_own_language: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -170,6 +194,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            languages: LanguagesConfig::default(),
             stt: SttConfig::default(),
             translate: TranslateConfig::default(),
             tts: TtsConfig::default(),
@@ -185,9 +210,9 @@ impl Default for Config {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            provider: "soniox".into(),
-            language: "auto".into(),
-            language_reverse: "auto".into(),
+            provider: "local".into(),
+            language: "en".into(),
+            language_reverse: "zh".into(),
             api_key_env: "SONIOX_API_KEY".into(),
             model: "gpt-4o-mini-transcribe".into(),
             model_path: default_models_dir().join("vosk").display().to_string(),
@@ -198,7 +223,7 @@ impl Default for SttConfig {
 impl Default for TranslateConfig {
     fn default() -> Self {
         Self {
-            provider: "ollama".into(),
+            provider: "local".into(),
             target: "Chinese".into(),
             target_reverse: "English".into(),
             model: "qwen2.5:3b".into(),
@@ -233,6 +258,7 @@ impl Default for AudioConfig {
             input: "loopback".into(),
             loopback_device: String::new(),
             pid: 0,
+            process: String::new(),
             output_device: String::new(),
             mic_device: String::new(),
             remote_output_device: String::new(),
@@ -242,6 +268,7 @@ impl Default for AudioConfig {
             mute_inbound: false,
             mute_outbound: false,
             backlog_jump_secs: 0,
+            skip_own_language: true,
             mode: "both".into(),
             vad_rms: 250.0,
             silence_ms: 450,
@@ -335,7 +362,13 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读取配置失败: {}", path.display()))?;
+        let raw: toml::Value = toml::from_str(&text)?;
         let mut cfg: Config = toml::from_str(&text)?;
+        if raw.get("languages").is_none() {
+            cfg.languages = infer_languages(&cfg);
+            migrate_engines(&mut cfg);
+        }
+        cfg.apply_languages();
         if cfg.version == 0 {
             cfg.version = CONFIG_VERSION;
         } else if cfg.version > CONFIG_VERSION {
@@ -345,6 +378,52 @@ impl Config {
             );
         }
         Ok(cfg)
+    }
+
+    /// 由 `[languages]` 推出两个方向的识别语言、翻译目标和朗读音色。
+    ///
+    /// 入向（对方 → 我）：识别 theirs，译成 mine，用 mine 的音色朗读；
+    /// 出向（我 → 对方）：识别 mine，译成 theirs，用 theirs 的音色朗读。
+    /// 用户自选的音色只要语种对得上就保留，换了语言才换成该语言的默认音色。
+    pub fn apply_languages(&mut self) {
+        let mine = crate::lang::find(&self.languages.mine)
+            .or_else(|| crate::lang::find("zh"))
+            .expect("语言表里必有 zh");
+        let theirs = crate::lang::find(&self.languages.theirs)
+            .or_else(|| crate::lang::find("en"))
+            .expect("语言表里必有 en");
+        self.languages.mine = mine.code.into();
+        self.languages.theirs = theirs.code.into();
+        self.stt.language = theirs.code.into();
+        self.stt.language_reverse = mine.code.into();
+        self.translate.target = mine.name.into();
+        self.translate.target_reverse = theirs.name.into();
+        if !voice_fits(&self.tts.voice, mine) {
+            self.tts.voice = mine.edge_voice.into();
+        }
+        if !voice_fits(&self.tts.voice_reverse, theirs) {
+            self.tts.voice_reverse = theirs.edge_voice.into();
+        }
+    }
+
+    /// 本次运行实际会跑的翻译方向（源语言, 目标语言）。
+    /// 入向：对方 → 我；出向：我 → 对方（双向同传或 mode=speak 时）。
+    pub fn directions(&self) -> Vec<(&'static crate::lang::Lang, &'static crate::lang::Lang)> {
+        let (mine, theirs) = (self.mine(), self.theirs());
+        match self.audio.mode.as_str() {
+            "speak" => vec![(mine, theirs)],
+            "listen" => vec![(theirs, mine)],
+            _ if self.audio.duplex => vec![(theirs, mine), (mine, theirs)],
+            _ => vec![(theirs, mine)],
+        }
+    }
+
+    pub fn mine(&self) -> &'static crate::lang::Lang {
+        crate::lang::find(&self.languages.mine).unwrap_or(&crate::lang::LANGS[0])
+    }
+
+    pub fn theirs(&self) -> &'static crate::lang::Lang {
+        crate::lang::find(&self.languages.theirs).unwrap_or(&crate::lang::LANGS[1])
     }
 
     pub fn write_template(path: &str) -> Result<()> {
@@ -358,23 +437,112 @@ impl Config {
     }
 }
 
+/// 旧版配置（没有 `[languages]`）里跑不起来或已被取代的引擎，换成本地引擎。
+///
+/// 旧模板默认是 Soniox + Ollama：没有密钥、没装 Ollama 的机器上双击启动就报错。
+/// 只替换"肯定跑不起来"或"已有更好替代"的情况，用户真配好的在线引擎保持不变。
+fn migrate_engines(cfg: &mut Config) {
+    let key = |name: &str| std::env::var(name).is_ok();
+    let mut changed = Vec::new();
+    let stt_dead = match cfg.stt.provider.as_str() {
+        "soniox" => !key("SONIOX_API_KEY"),
+        "openai" => !key("OPENAI_API_KEY"),
+        // Zipformer 中文会叠字（"上周周周周"），SenseVoice 全面更好
+        "zipformer" | "sherpa" => crate::stt::sensevoice_ready(),
+        _ => false,
+    };
+    if stt_dead {
+        changed.push(format!("识别 {} → local", cfg.stt.provider));
+        cfg.stt.provider = "local".into();
+    }
+    let tr_dead = match cfg.translate.provider.as_str() {
+        "openai" => !key("OPENAI_API_KEY"),
+        "gemini" => !key("GEMINI_API_KEY"),
+        "qwen" => !key("DASHSCOPE_API_KEY"),
+        "ollama" => !ollama_running(&cfg.translate.endpoint),
+        "marian" => true,
+        _ => false,
+    };
+    if tr_dead {
+        changed.push(format!("翻译 {} → local", cfg.translate.provider));
+        cfg.translate.provider = "local".into();
+    }
+    if !changed.is_empty() {
+        eprintln!("[config] 旧版配置已升级：{}", changed.join("，"));
+    }
+}
+
+fn ollama_running(endpoint: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let host = endpoint
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("127.0.0.1:11434")
+        .to_string();
+    let host = if host.contains(':') { host } else { format!("{host}:11434") };
+    host.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .map(|a| std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(300)).is_ok())
+        .unwrap_or(false)
+}
+
+/// 旧配置没有 `[languages]`：从原来分散的 target / language 字段推断，保持原行为。
+fn infer_languages(cfg: &Config) -> LanguagesConfig {
+    let code = |s: &str| crate::lang::find(s).map(|l| l.code.to_string());
+    let mine = code(&cfg.translate.target)
+        .or_else(|| code(&cfg.stt.language_reverse))
+        .unwrap_or_else(|| "zh".into());
+    let theirs = code(&cfg.translate.target_reverse)
+        .or_else(|| code(&cfg.stt.language))
+        .filter(|t| *t != mine)
+        .unwrap_or_else(|| if mine == "en" { "zh".into() } else { "en".into() });
+    LanguagesConfig { mine, theirs }
+}
+
+/// 音色是否适合该语言。Edge 音色按语种前缀判断（中文/粤语要区分 zh-CN 与 zh-HK）；
+/// 非 Edge 音色（SAPI 名、OpenAI 的 alloy 等）无法判断，原样保留。
+fn voice_fits(voice: &str, lang: &crate::lang::Lang) -> bool {
+    if voice.trim().is_empty() {
+        return false;
+    }
+    if !voice.contains("Neural") {
+        return true;
+    }
+    let want = crate::lang::voice_locale(lang.edge_voice);
+    let have = crate::lang::voice_locale(voice);
+    if matches!(lang.code, "zh" | "yue") {
+        have.eq_ignore_ascii_case(want)
+    } else {
+        have.split('-').next() == want.split('-').next()
+    }
+}
+
 pub const TEMPLATE: &str = r#"# simulvoice 配置
 version = 1
 
+[languages]
+# 两门语言决定一切：对方说 theirs → 识别 → 译成 mine 念给你听；
+# 你说 mine → 识别 → 译成 theirs 送给对方（双向需 audio.duplex = true）。
+# 可用：zh en ja ko yue fr de es ru pt it ar vi th id ms hi tr nl pl uk
+mine = "zh"
+theirs = "en"
+
 [stt]
-# soniox(在线流式) | openai(在线) | vosk(本地, 需先 models vosk) | none
-provider = "soniox"
-language = "auto"              # 入向(对方→你)识别语言
-language_reverse = "auto"      # 出向(你→对方)识别语言
+# local(本地, 按语言自动选 SenseVoice/Whisper, 推荐) | soniox(在线流式) | openai(在线) | vosk | none
+provider = "local"
+# language / language_reverse 由 [languages] 自动推出，无需手填
 api_key_env = "SONIOX_API_KEY"
 model = "gpt-4o-mini-transcribe"
 model_path = ""                # 空则用 ~/simulvoice/models/vosk
 
 [translate]
-# ollama(本地) | openai | gemini | qwen | custom | none
-provider = "ollama"
-target = "Chinese"             # 入向(对方→你)
-target_reverse = "English"     # 出向(你→对方)
+# local(本地, 中英用 Marian、其他语言用 NLLB, 推荐) | ollama | openai | gemini | qwen | custom | none
+provider = "local"
+# target / target_reverse 由 [languages] 自动推出
 model = "qwen2.5:3b"
 endpoint = "http://127.0.0.1:11434"   # ollama / custom 的地址
 api_key_env = "OPENAI_API_KEY"
@@ -384,8 +552,8 @@ extra_targets = []             # 额外字幕语言，如 ["English","Japanese"]
 [tts]
 # edge(在线免费) | sapi(本地 Windows 语音) | openai(在线) | none
 provider = "edge"
-voice = "zh-CN-XiaoxiaoNeural"        # 入向音色
-voice_reverse = "en-US-AriaNeural"    # 出向音色
+voice = "zh-CN-XiaoxiaoNeural"        # 入向音色（须是 mine 语言的音色，否则自动换默认）
+voice_reverse = "en-US-AriaNeural"    # 出向音色（须是 theirs 语言的音色）
 model = "gpt-4o-mini-tts"
 api_key_env = "OPENAI_API_KEY"
 rate = "+0%"
@@ -407,6 +575,7 @@ cross_barge_in = false         # 跨方向打断：对方说话也停另一方�
 mute_inbound = false           # 静音入向译文
 mute_outbound = false          # 静音出向译文
 backlog_jump_secs = 0          # 积压超过 N 秒跳至最新（0=不跳，字幕保留）
+skip_own_language = true       # 对方那路有人说我的语言时只显示原文（两门语言文字不同才生效）
 vad_rms = 250
 silence_ms = 450
 max_utterance_ms = 8000
@@ -473,43 +642,124 @@ output_device = ""
 
 
 
-/// Applies a named scenario preset to `cfg`.
-pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<()> {
-    cfg.stt.api_key_env = "SONIOX_API_KEY".into();
-    cfg.translate.provider = "openai".into();
-    cfg.translate.api_key_env = "OPENAI_API_KEY".into();
-    cfg.tts.provider = "edge".into();
+/// 应用场景预设。
+///
+/// 预设只描述「用途」（双向同传 / 听译 / 记录），引擎则按这台机器上真的能跑什么来选：
+/// 先看密钥，再看已下载的本地模型。否则预设会写出一份启动即失败、而且看不出原因的配置。
+pub fn apply_preset(cfg: &mut Config, name: &str) -> anyhow::Result<String> {
+    match name {
+        "teams" | "game" | "record" => {}
+        _ => anyhow::bail!("未知预设: {name}"),
+    }
+    let mut notes = Vec::new();
+    pick_stt_engine(cfg, &mut notes);
+    pick_translate_engine(cfg, &mut notes);
+    pick_tts_engine(cfg, &mut notes);
+    // 语言沿用用户已选的 [languages]，预设只改用途
+    cfg.apply_languages();
     match name {
         "teams" => {
             cfg.audio.duplex = true;
             cfg.audio.remote_output_device = String::new();
             cfg.audio.output_device = String::new();
-            cfg.stt.language = "en".into();
-            cfg.stt.language_reverse = "zh".into();
-            cfg.translate.target = "Chinese".into();
-            cfg.translate.target_reverse = "English".into();
-            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
-            cfg.tts.voice_reverse = "en-US-AriaNeural".into();
             cfg.ui.subtitles = true;
         }
         "game" => {
             cfg.audio.mode = "listen".into();
-            cfg.stt.language = "en".into();
-            cfg.translate.target = "Chinese".into();
-            cfg.tts.voice = "zh-CN-XiaoxiaoNeural".into();
             cfg.ui.subtitles = true;
         }
         "record" => {
             cfg.audio.mode = "listen".into();
-            cfg.stt.language = "auto".into();
-            cfg.translate.target = "Chinese".into();
             cfg.tts.provider = "none".into();
             cfg.ui.subtitles = true;
             cfg.ui.transcript_path = "transcript.txt".into();
         }
-        _ => anyhow::bail!("未知预设: {name}"),
+        _ => unreachable!(),
     }
-    Ok(())
+    Ok(notes.join("；"))
+}
+
+fn has_file_named(dir: &std::path::Path, prefix: &str, ext: &str) -> bool {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.filter_map(|e| e.ok()).any(|e| {
+                let p = e.path();
+                p.extension().and_then(|x| x.to_str()) == Some(ext)
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with(prefix))
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn pick_stt_engine(cfg: &mut Config, notes: &mut Vec<String>) {
+    let models = default_models_dir();
+    let vosk = models.join("vosk");
+    if std::env::var("SONIOX_API_KEY").is_ok() {
+        cfg.stt.provider = "soniox".into();
+        cfg.stt.api_key_env = "SONIOX_API_KEY".into();
+        cfg.stt.model_path = String::new();
+        return;
+    }
+    // 本地首选 SenseVoice（中英日韩粤，带标点、准确率远高于 Zipformer），其余语言 Whisper
+    if crate::stt::sensevoice_ready() || crate::stt::whisper_ready() {
+        cfg.stt.provider = "local".into();
+        cfg.stt.model_path = String::new();
+        notes.push("识别=本地(SenseVoice/Whisper)".into());
+        return;
+    }
+    if has_file_named(&models.join("zipformer"), "encoder", "onnx") {
+        cfg.stt.provider = "zipformer".into();
+        cfg.stt.model_path = models.join("zipformer").display().to_string();
+        notes.push("识别=Zipformer(本地，建议改下载 SenseVoice)".into());
+        return;
+    }
+    if vosk.is_dir() && has_file_named(&vosk, "", "mdl") {
+        cfg.stt.provider = "vosk".into();
+        cfg.stt.model_path = vosk.display().to_string();
+        notes.push("识别=Vosk(本地)".into());
+        return;
+    }
+    cfg.stt.provider = "soniox".into();
+    cfg.stt.api_key_env = "SONIOX_API_KEY".into();
+    notes.push("识别=Soniox（缺 SONIOX_API_KEY，也可先 models sensevoice 下载本地模型）".into());
+}
+
+fn pick_translate_engine(cfg: &mut Config, notes: &mut Vec<String>) {
+    let dirs = crate::nmt::ModelDirs::new("");
+    let local_ok = crate::nmt::locate(&dirs, cfg.theirs(), cfg.mine(), None).is_ok()
+        && crate::nmt::locate(&dirs, cfg.mine(), cfg.theirs(), None).is_ok();
+    // 本地优先：会议里每句都要翻，在线接口的 503/超时会直接变成"没声音"；
+    // 想要大模型的译文质量，可在设置里手动切到 OpenAI/Gemini。
+    if local_ok {
+        cfg.translate.provider = "local".into();
+        cfg.translate.model = String::new();
+        notes.push("翻译=本地(Marian/NLLB)".into());
+        return;
+    }
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        cfg.translate.provider = "openai".into();
+        cfg.translate.api_key_env = "OPENAI_API_KEY".into();
+        cfg.translate.model = "gpt-4o-mini".into();
+        notes.push("翻译=OpenAI".into());
+        return;
+    }
+    if std::env::var("GEMINI_API_KEY").is_ok() {
+        cfg.translate.provider = "gemini".into();
+        cfg.translate.api_key_env = "GEMINI_API_KEY".into();
+        cfg.translate.model = "gemini-flash-latest".into();
+        notes.push("翻译=Gemini".into());
+        return;
+    }
+    cfg.translate.provider = "local".into();
+    notes.push("翻译=本地（先运行 simulvoice models nllb 下载模型）".into());
+}
+
+fn pick_tts_engine(cfg: &mut Config, _notes: &mut Vec<String>) {
+    cfg.tts.provider = "edge".into();
+    cfg.tts.api_key_env = "OPENAI_API_KEY".into();
 }
 
 

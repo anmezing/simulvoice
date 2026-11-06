@@ -148,22 +148,39 @@ impl Translator for PassThroughTranslator {
     }
 }
 
-pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>> {
+/// 构造一个方向的翻译器。`from`/`to` 是语言代码或名称（"zh"、"English"、"日语"均可）。
+///
+/// 在线引擎只需要目标语言名；本地引擎（local / marian / nllb）还要源语言来选模型。
+pub fn build(cfg: &crate::config::TranslateConfig, from: &str, to: &str) -> Result<Box<dyn Translator>> {
+    let target_name = crate::lang::find(to)
+        .map(|l| l.name.to_string())
+        .unwrap_or_else(|| to.trim().to_string());
+    let local = |only: Option<crate::nmt::Family>| -> Result<Box<dyn Translator>> {
+        let src = crate::lang::get(from)
+            .map_err(|_| anyhow!("本地翻译需要明确的源语言（当前: {from:?}），不能是 auto"))?;
+        let tgt = crate::lang::get(to)?;
+        let dirs = crate::nmt::ModelDirs::new(&cfg.marian_dir);
+        let t = crate::nmt::NmtTranslator::new(&dirs, src, tgt, only)?;
+        eprintln!("[翻译] 本地 {}", t.describe());
+        Ok(Box::new(t))
+    };
     Ok(match cfg.provider.as_str() {
         "none" => Box::new(PassThroughTranslator),
-        "marian" => Box::new(crate::marian::MarianTranslator::new(&cfg.target, &cfg.marian_dir)?),
+        "local" => local(None)?,
+        "marian" => local(Some(crate::nmt::Family::Marian))?,
+        "nllb" => local(Some(crate::nmt::Family::Nllb))?,
         "gemini" => {
             let key = std::env::var(&cfg.api_key_env)
                 .or_else(|_| std::env::var("GEMINI_API_KEY"))
                 .map_err(|_| anyhow!("GEMINI_API_KEY 未设置"))?;
             Box::new(GeminiTranslator {
                 api_key: key,
-                model: if cfg.model.is_empty() {
-                    "gemini-2.0-flash".into()
+                model: if cfg.model.is_empty() || cfg.model.starts_with("gemini-2.0") {
+                    "gemini-flash-latest".into()
                 } else {
                     cfg.model.clone()
                 },
-                target_lang: cfg.target.clone(),
+                target_lang: target_name,
                 glossary: cfg.glossary.clone(),
             })
         }
@@ -179,7 +196,7 @@ pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>
                     cfg.model.clone()
                 },
                 base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
-                target_lang: cfg.target.clone(),
+                target_lang: target_name,
                 glossary: cfg.glossary.clone(),
             })
         }
@@ -189,14 +206,14 @@ pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>
                 api_key: key,
                 model: cfg.model.clone(),
                 base_url: cfg.endpoint.trim_end_matches("/").to_string(),
-                target_lang: cfg.target.clone(),
+                target_lang: target_name,
                 glossary: cfg.glossary.clone(),
             })
         }
         "ollama" => Box::new(OllamaTranslator {
             endpoint: cfg.endpoint.clone(),
             model: cfg.model.clone(),
-            target_lang: cfg.target.clone(),
+            target_lang: target_name,
             glossary: cfg.glossary.clone(),
         }),
         _ => {
@@ -211,20 +228,9 @@ pub fn build(cfg: &crate::config::TranslateConfig) -> Result<Box<dyn Translator>
                 },
                 base_url: std::env::var("OPENAI_BASE_URL")
                     .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-                target_lang: cfg.target.clone(),
+                target_lang: target_name,
                 glossary: cfg.glossary.clone(),
             })
         }
     })
 }
-
-
-
-
-
-
-
-
-
-
-

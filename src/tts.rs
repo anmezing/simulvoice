@@ -130,6 +130,22 @@ impl SherpaTts {
     }
 }
 
+/// 把合成结果写成 16-bit 单声道 WAV：没有扬声器也能自检离线 TTS。
+pub fn write_wav(path: &str, samples: &[f32], rate: u32) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec)?;
+    for &s in samples {
+        w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)?;
+    }
+    w.finalize()?;
+    Ok(())
+}
+
 
 
 /// Split long text into speakable clauses (punctuation aware).

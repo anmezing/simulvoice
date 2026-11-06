@@ -5,8 +5,9 @@ Windows 上的实时语音同传工具：捕获系统或指定进程的声音（
 ## 功能
 
 - **采集**：WASAPI 系统回环、指定进程（Windows 10 2004+）、麦克风，双向并行
-- **识别**：Soniox（流式）、OpenAI、Vosk、SenseVoice / Zipformer（本地 ONNX）
-- **翻译**：OpenAI、Gemini、Qwen、任意 OpenAI 兼容端点、Ollama（本地）
+- **识别**：本地 SenseVoice（中英日韩粤）/ Whisper（其他语言），按语言自动选；在线 Soniox、OpenAI
+- **翻译**：本地 Marian（单语言对，快）/ NLLB-200（任意语言兜底），自动选路线；在线 OpenAI、Gemini、Qwen、Ollama、OpenAI 兼容端点
+- **语言**：只选「对方说 / 我说」两门语言（21 种），两个方向的识别、翻译、音色自动推出
 - **TTS**：Edge（免费）、OpenAI、Windows SAPI、Piper（离线）
 - **端到端实时引擎**：Gemini Live、Palabra.ai、火山引擎 Doubao（语音/文本直出）
 - **音频处理**：RNNoise 降噪、Silero VAD、AGC、抖动缓冲、16/24/32-bit 与 float 格式、朗读时压低其他应用音量
@@ -16,11 +17,12 @@ Windows 上的实时语音同传工具：捕获系统或指定进程的声音（
 ## 构建
 
 要求：Windows 10/11、Rust stable（MSVC 工具链）。
-AEC 依赖静态编译 speexdsp：另需 CMake 与 LLVM/libclang（`.cargo/config.toml` 已指向本机路径；换机器需改 `CMAKE`、`LIBCLANG_PATH`）。
+AEC 依赖静态编译 speexdsp：另需 CMake 与 LLVM/libclang。构建前先设好环境变量（本机 LLVM 在 `D:\Program Files\LLVM`）：
 
 ```powershell
+$env:LIBCLANG_PATH = "D:\Program Files\LLVM\bin"
 cargo build --release
-# 产物: target\release\simulvoice.exe
+# 产物: target\release\simulvoice.exe（同目录需有 onnxruntime_marian.dll，本地翻译用）
 ```
 
 或生成便携包：
@@ -38,12 +40,20 @@ cargo build --release
 - **便携版**：解压 zip 直接运行 `simulvoice.exe`，数据默认在 `<exe 目录>\data`（相对标记，整体搬走数据跟随）
 ## 快速开始
 
-双击 `simulvoice.exe`（不带参数）会直接打开设置面板：选场景预设、填密钥、下载模型、保存即可。
+双击 `simulvoice.exe`，三步：
+
+1. 选「对方说」和「我说」的语言；
+2. 选「只听翻译」或「双向翻译」；
+3. 选会议软件（腾讯会议、Teams、Zoom 等开着时会自动选中），点「开始翻译」。
+
+第一次开始时会自动下载所需模型（中英约 0.7 GB，只需一次）。译文字幕实时显示在窗口里，日志写在数据目录的 `simulvoice.log`。
+双向翻译要让对方听到你的译音，需安装免费的 [VB-CABLE](https://vb-audio.com/Cable/)，并在会议软件里把麦克风选成 `CABLE Output`；没装时你的话只显示字幕。
 
 命令行等价：
 
 ```powershell
-simulvoice settings         # 图形化设置（预设 / 密钥 / 模型下载 / 数据目录）
+simulvoice settings         # 图形界面
+simulvoice settings --start # 打开即开始翻译（可做成桌面快捷方式）
 simulvoice preset teams     # 双向同传（Teams / Zoom）
 simulvoice preset game      # 游戏听译（只显示字幕）
 simulvoice preset record    # 会议记录（字幕 + 转写文件）
@@ -63,7 +73,7 @@ simulvoice run              # 使用数据目录里的 simulvoice.toml
 
 | 路线 | 配置 |
 |---|---|
-| 全本地 | `stt=vosk` + `translate=ollama` + `tts=sapi` 或 `sherpa` |
+| 全本地（推荐） | `stt=local` + `translate=local` + `tts=edge`（在线朗读）或 `sherpa`（离线） |
 | 全在线 | `stt=soniox` + `translate=openai` + `tts=edge` |
 | 混合 | 本地识别 + 在线翻译 + 本地 TTS |
 
@@ -76,18 +86,23 @@ provider = "gemini-live"   # 或 palabra / volcengine
 
 ## 本地模型
 
+图形界面会按所选语言自动下载；命令行也可手动下载：
+
 ```powershell
-simulvoice models vosk cn          # 中文离线识别（小模型）
-simulvoice models vosk cn-big      # 大模型（精度更高）
-simulvoice models sensevoice       # SenseVoice int8（ONNX，中英日韩粤）
-simulvoice models zipformer       # Zipformer 流式（中英）
-simulvoice models marian          # MarianNMT 离线中英翻译（约 500MB）
-simulvoice models aec             # 神经 AEC 模型（DEC baseline，可选）
+simulvoice models sensevoice       # 识别：中英日韩粤（230 MB，准确、带标点）
+simulvoice models whisper          # 识别：其他语言（Whisper-small int8，约 380 MB）
+simulvoice models marian           # 翻译：中英两个方向（每个方向约 250 MB）
+simulvoice models marian ja-en     # 翻译：任意 opus-mt 语言对
+simulvoice models nllb             # 翻译：200 种语言兜底（约 0.9 GB，较慢）
+simulvoice models piper de         # 离线朗读，按语言（zh en fr de es ru pt it ar vi tr pl）
 simulvoice models silero           # Silero VAD
-simulvoice models piper zh         # 离线神经 TTS（中文）
+simulvoice models aec              # 神经 AEC 模型（可选）
 ```
 
-本地翻译：安装 Ollama 后 `ollama pull qwen2.5:3b`，配置 `translate.provider="ollama"`。
+本地翻译路线：有直达的 Marian 语言对就直达（约 0.2–0.6 秒/句）；两边都能和英语互译时经英语中转（约 0.6–0.9 秒）；
+其余（如 英→日/韩、粤语）用 NLLB（2–5 秒/句）。追求译文质量可在「高级设置」里改用 Gemini / OpenAI。
+
+自测：`simulvoice translate "文本" --from zh --to en --bench`、`simulvoice transcribe 音频文件`。
 
 ## 双向同传（Teams / Zoom / 游戏）
 
@@ -184,7 +199,7 @@ WASAPI / 进程回环 / 麦克风
 
 - 默认 CPU：`[tts] onnx_provider`、`[dsp] onnx_provider` 均为 `cpu`。
 - DirectML 不在官方预编译包里：需自行用源码构建 sherpa-onnx（`-DSHERPA_ONNX_ENABLE_DIRECTML=ON -DBUILD_SHARED_LIBS=ON -DSHERPA_ONNX_USE_STATIC_CRT=OFF`），设置 `SHERPA_ONNX_LIB_DIR`，并随程序分发 onnxruntime/DirectML DLL，然后把 provider 改成 `directml`。
-- 当前本地 ONNX 链路已覆盖 SenseVoice / Zipformer ASR、Silero VAD、Piper TTS；`[stt] provider = "sherpa"` 用 SenseVoice，`"zipformer"` 用流式识别。
+- 当前本地 ONNX 链路已覆盖 SenseVoice / Whisper ASR、Marian / NLLB 翻译、Silero VAD、Piper TTS；`[stt] provider = "local"` 按语言自动选识别模型。
 - DirectML 版：源码编译 sherpa-onnx shared（`SHERPA_ONNX_ENABLE_DIRECTML=ON`）后运行 `package.ps1 -DirectML`，生成 `*-directml-portable.zip`（含 DirectML/onnxruntime DLL），解压后把 `[dsp]/[tts] onnx_provider` 设为 `directml`；缺 DLL 或驱动不支持时 sherpa 自动回退 CPU。
 - 量化模型可直接使用 int8 文件。
 

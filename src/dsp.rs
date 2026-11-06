@@ -199,28 +199,39 @@ impl JitterBuffer {
 }
 
 /// Pre-roll ring for VAD so the first syllable is not clipped.
+/// 语音起点之前的音频缓存（按采样数封顶，与采集块大小无关）。
+///
+/// VAD 要听到一小段语音才确认"开始说话"，确认前的音频必须补喂给识别，
+/// 否则每句的第一个词被吃掉（"Good morning" → "Morning"）。
 pub struct PreRoll {
     frames: VecDeque<Vec<i16>>,
-    cap: usize,
+    max_samples: usize,
+    total: usize,
 }
 
 impl PreRoll {
-    pub fn new(cap: usize) -> Self {
+    pub fn with_samples(max_samples: usize) -> Self {
         Self {
             frames: VecDeque::new(),
-            cap,
+            max_samples,
+            total: 0,
         }
     }
     pub fn push(&mut self, frame: Vec<i16>) {
+        self.total += frame.len();
         self.frames.push_back(frame);
-        while self.frames.len() > self.cap {
-            self.frames.pop_front();
+        while self.total > self.max_samples && self.frames.len() > 1 {
+            if let Some(f) = self.frames.pop_front() {
+                self.total -= f.len();
+            }
         }
     }
     pub fn drain(&mut self) -> Vec<Vec<i16>> {
+        self.total = 0;
         self.frames.drain(..).collect()
     }
     pub fn clear(&mut self) {
+        self.total = 0;
         self.frames.clear();
     }
 }

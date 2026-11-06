@@ -270,6 +270,11 @@ pub fn last_tick() -> u64 {
     LAST_TICK.load(Ordering::Relaxed)
 }
 
+/// 新会话开始前清零，否则看门狗会拿上一次会话的时间戳判定"采集卡死"。
+pub fn reset_tick() {
+    LAST_TICK.store(0, Ordering::Relaxed);
+}
+
 pub fn rms(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -282,3 +287,77 @@ pub fn rms(samples: &[i16]) -> f64 {
 
 
 
+
+#[cfg(windows)]
+pub fn list_window_processes() -> Vec<(u32, String, String)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return 1;
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        let title = String::from_utf16_lossy(&buf[..len as usize]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return 1;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        let name = if h.is_null() {
+            String::new()
+        } else {
+            let mut pbuf = [0u16; 1024];
+            let mut plen = pbuf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, 0, pbuf.as_mut_ptr(), &mut plen);
+            let _ = CloseHandle(h);
+            if ok == 0 {
+                String::new()
+            } else {
+                String::from_utf16_lossy(&pbuf[..plen as usize])
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            }
+        };
+        let out = &mut *(lparam as *mut Vec<(u32, String, String)>);
+        if !out.iter().any(|(p, _, _)| *p == pid) {
+            out.push((pid, name, title));
+        }
+        1
+    }
+
+    let mut out: Vec<(u32, String, String)> = Vec::new();
+    unsafe {
+        EnumWindows(Some(cb), &mut out as *mut _ as LPARAM);
+    }
+    out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    out
+}
+
+#[cfg(not(windows))]
+pub fn list_window_processes() -> Vec<(u32, String, String)> {
+    Vec::new()
+}
+
+/// 按可执行文件名找一个有窗口的进程（会议软件重启后 PID 会变）。
+pub fn find_pid(exe: &str) -> Option<u32> {
+    let want = exe.trim();
+    if want.is_empty() {
+        return None;
+    }
+    list_window_processes()
+        .into_iter()
+        .find(|(_, name, _)| name.eq_ignore_ascii_case(want))
+        .map(|(pid, _, _)| pid)
+}

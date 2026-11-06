@@ -1,5 +1,22 @@
 use std::path::PathBuf;
 
+/// Values that are obviously left-over template text rather than a real credential.
+/// A placeholder is worse than a missing key: it makes `doctor` report the engine as
+/// configured and then fails with an opaque 401 on the first utterance.
+fn is_placeholder(v: &str) -> bool {
+    let t = v.trim();
+    if t.is_empty() {
+        return true;
+    }
+    if t.ends_with("...") || t.ends_with("…") {
+        return true;
+    }
+    matches!(
+        t.to_ascii_lowercase().as_str(),
+        "your-key" | "your_api_key" | "your-api-key" | "changeme" | "change-me" | "xxx" | "todo"
+    )
+}
+
 /// Loads local API keys into the environment without logging their values.
 pub fn load_env() {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -34,6 +51,12 @@ pub fn load_env() {
                     } else {
                         s.to_string()
                     };
+                    if is_placeholder(&value) {
+                        eprintln!(
+                            "[keys] {table}.{key} 是占位符（{value}），按未设置处理；请填真实密钥"
+                        );
+                        return;
+                    }
                     if !value.is_empty() {
                         std::env::set_var(env, value);
                     }
@@ -42,6 +65,7 @@ pub fn load_env() {
         };
         set("OPENAI_API_KEY", "openai", "api_key");
         set("GEMINI_API_KEY", "gemini", "api_key");
+        set("SONIOX_API_KEY", "soniox", "api_key");
         set("PALABRA_API_KEY", "palabra", "api_key");
         set("VOLC_APP_ID", "volcengine", "app_id");
         set("VOLC_ACCESS_TOKEN", "volcengine", "access_token");
@@ -179,4 +203,30 @@ pub fn roundtrip_test() -> bool {
 
 
 
+
+
+/// Writes one key into the data-dir keys.toml and sets it for this process.
+pub fn set_key(table: &str, key: &str, value: &str) -> anyhow::Result<()> {
+    let path = crate::paths::keys_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut root: toml::Value = if path.exists() {
+        let text = std::fs::read_to_string(&path)?;
+        toml::from_str(&text).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    } else {
+        toml::Value::Table(Default::default())
+    };
+    let table_value = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("keys.toml 根节点不是表"))?
+        .entry(table)
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    table_value
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("keys.toml 表结构错误"))?
+        .insert(key.to_string(), toml::Value::String(value.to_string()));
+    std::fs::write(&path, toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
 

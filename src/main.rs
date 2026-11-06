@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod aec;
 mod audio_out;
 mod capture;
@@ -10,7 +11,8 @@ mod hotkeys;
 mod http;
 mod keys;
 mod livetest;
-mod marian;
+mod lang;
+mod nmt;
 mod recorder;
 mod palabra;
 mod paths;
@@ -95,7 +97,7 @@ fn preset(args: &[String]) -> Result<()> {
     let name = args.get(1).map(String::as_str).unwrap_or("");
     let path = flag(args, "--config").unwrap_or_else(|| "simulvoice.toml".into());
     let mut cfg = Config::default();
-    config::apply_preset(&mut cfg, name)?;
+    let summary = config::apply_preset(&mut cfg, name)?;
     if name == "teams" {
         let (cable, headset) =
             sink::auto_pick_teams(&mut cfg.audio.output_device, &mut cfg.audio.remote_output_device);
@@ -108,14 +110,200 @@ fn preset(args: &[String]) -> Result<()> {
     }
     cfg.save(&path)?;
     println!("已写入 {path}");
+    if !summary.is_empty() {
+        println!("选用: {summary}");
+    }
     match name {
         "teams" => println!("Teams 双向：麦克风选 CABLE Output，务必把 output_device 设为耳机（留空会自激）"),
         "game" => println!("游戏听译：input=loopback 或 pid，output_device 建议耳机"),
         "record" => println!("会议记录：仅字幕 + transcript.txt"),
         _ => {}
     }
+    if name != "record" {
+        let problems = missing_requirements(&cfg);
+        if !problems.is_empty() {
+            println!("注意：这份配置还缺东西——");
+            for p in problems {
+                println!("  ✗ {p}");
+            }
+        }
+    }
     Ok(())
 }
+/// 选定的引擎在启动前是否具备运行条件（密钥、模型）。
+///
+/// doctor 用它做体检，run 用它做启动拦截：缺东西必须在这里说清楚，否则进程会在一句
+/// 话都没翻译之前退出，而使用者只看到「没反应」。
+fn missing_requirements(cfg: &Config) -> Vec<String> {
+    let models = config::default_models_dir();
+    let mut missing = Vec::new();
+
+    let stt_path = |p: &str, sub: &str| -> std::path::PathBuf {
+        if p.trim().is_empty() {
+            models.join(sub)
+        } else {
+            std::path::PathBuf::from(p.trim())
+        }
+    };
+    let directions = cfg.directions();
+    match cfg.stt.provider.as_str() {
+        "soniox" if std::env::var("SONIOX_API_KEY").is_err() => missing.push(
+            "stt=soniox 需要 SONIOX_API_KEY（在 keys.toml 加 [soniox] api_key = \"...\"）".into(),
+        ),
+        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
+            missing.push("stt=openai 需要 OPENAI_API_KEY".into())
+        }
+        "vosk" => {
+            let p = stt_path(&cfg.stt.model_path, "vosk");
+            if !p.is_dir() {
+                missing.push(format!("stt=vosk 模型不存在: {}", p.display()));
+            }
+        }
+        "zipformer" => {
+            let p = stt_path(&cfg.stt.model_path, "zipformer");
+            if !p.is_dir() {
+                missing.push(format!("stt=zipformer 模型不存在: {}", p.display()));
+            }
+        }
+        "sherpa" => {
+            if !stt::sensevoice_ready() {
+                missing.push("stt=sherpa 缺 SenseVoice 模型（simulvoice models sensevoice）".into());
+            }
+        }
+        "whisper" => {
+            if !stt::whisper_ready() {
+                missing.push("stt=whisper 缺 Whisper 模型（simulvoice models whisper）".into());
+            }
+        }
+        "local" => {
+            for (src, _) in &directions {
+                if src.sensevoice && stt::sensevoice_ready() {
+                    continue;
+                }
+                if stt::whisper_ready() {
+                    continue;
+                }
+                missing.push(if src.sensevoice {
+                    format!("识别{}需要 SenseVoice 模型（simulvoice models sensevoice）", src.label)
+                } else {
+                    format!("识别{}需要 Whisper 模型（simulvoice models whisper，约 640 MB）", src.label)
+                });
+            }
+        }
+        _ => {}
+    }
+
+    match cfg.translate.provider.as_str() {
+        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
+            missing.push("翻译=openai 需要 OPENAI_API_KEY".into())
+        }
+        "gemini" if std::env::var("GEMINI_API_KEY").is_err() => {
+            missing.push("翻译=gemini 需要 GEMINI_API_KEY".into())
+        }
+        "qwen" if std::env::var("DASHSCOPE_API_KEY").is_err() => {
+            missing.push("翻译=qwen 需要 DASHSCOPE_API_KEY".into())
+        }
+        "custom" if std::env::var("CUSTOM_API_KEY").is_err() => {
+            missing.push("翻译=custom 需要 CUSTOM_API_KEY".into())
+        }
+        p @ ("local" | "marian" | "nllb") => {
+            let only = match p {
+                "marian" => Some(nmt::Family::Marian),
+                "nllb" => Some(nmt::Family::Nllb),
+                _ => None,
+            };
+            let dirs = nmt::ModelDirs::new(&cfg.translate.marian_dir);
+            for (src, tgt) in &directions {
+                if let Err(e) = nmt::locate(&dirs, src, tgt, only) {
+                    missing.push(e.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+
+    match cfg.tts.provider.as_str() {
+        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
+            missing.push("TTS=openai 需要 OPENAI_API_KEY".into())
+        }
+        "sherpa" => {
+            for (_, tgt) in &directions {
+                let d = local_tts_dir(&cfg.tts.model_dir, tgt);
+                if !has_onnx(&d) {
+                    missing.push(if tgt.piper.is_empty() {
+                        format!("本地 TTS 没有{}音色，改用 edge 朗读", tgt.label)
+                    } else {
+                        format!(
+                            "本地 TTS 缺{}音色: {}（simulvoice models piper {}）",
+                            tgt.label,
+                            d.display(),
+                            tgt.code
+                        )
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    match cfg.realtime.provider.as_str() {
+        "gemini-live" if std::env::var("GEMINI_API_KEY").is_err() => {
+            missing.push("实时=gemini-live 需要 GEMINI_API_KEY".into())
+        }
+        "palabra" if std::env::var("PALABRA_API_KEY").is_err() => {
+            missing.push("实时=palabra 需要 PALABRA_API_KEY".into())
+        }
+        "volcengine" => {
+            if std::env::var("VOLC_APP_ID").is_err() {
+                missing.push("实时=volcengine 缺少 VOLC_APP_ID".into());
+            }
+            if std::env::var("VOLC_ACCESS_TOKEN").is_err() {
+                missing.push("实时=volcengine 缺少 VOLC_ACCESS_TOKEN".into());
+            }
+        }
+        _ => {}
+    }
+    missing
+}
+
+fn has_onnx(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("onnx"))
+        })
+        .unwrap_or(false)
+}
+
+/// 本地 Piper 朗读某语言用的模型目录。
+///
+/// 配置里填了自定义目录就照用（单语言）；否则按语言找 models/piper/<code>，
+/// 兼容旧版把中文音色放在 models/tts 的布局。
+fn local_tts_dir(model_dir: &str, l: &lang::Lang) -> std::path::PathBuf {
+    let models = config::default_models_dir();
+    let legacy = models.join("tts");
+    let custom = model_dir.trim();
+    if !custom.is_empty() && std::path::Path::new(custom) != legacy.as_path() {
+        return std::path::PathBuf::from(custom);
+    }
+    let per_lang = models.join("piper").join(l.code);
+    if has_onnx(&per_lang) {
+        return per_lang;
+    }
+    if !l.piper.is_empty() && legacy.join(format!("{}.onnx", l.piper)).exists() {
+        return legacy;
+    }
+    per_lang
+}
+
+/// 某方向的朗读配置：音色已由 apply_languages 选好，这里补上本地模型目录。
+fn tts_for(base: &config::TtsConfig, voice: &str, l: &lang::Lang) -> config::TtsConfig {
+    let mut t = base.clone();
+    t.voice = voice.to_string();
+    t.model_dir = local_tts_dir(&base.model_dir, l).display().to_string();
+    t
+}
+
 fn doctor(args: &[String]) -> Result<()> {
     let path = flag(args, "--config");
     let cfg = Config::load(path.as_deref())?;
@@ -130,75 +318,7 @@ fn doctor(args: &[String]) -> Result<()> {
     ] {
         println!("  {} {}", if std::env::var(env).is_ok() { "✓" } else { "-" }, name);
     }
-    let mut missing = Vec::new();
-    match cfg.stt.provider.as_str() {
-        "soniox" if std::env::var("SONIOX_API_KEY").is_err() => {
-            missing.push("STT=soniox 需要 SONIOX_API_KEY".to_string())
-        }
-        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
-            missing.push("STT=openai 需要 OPENAI_API_KEY".to_string())
-        }
-        "vosk" => {
-            let p = cfg.stt.model_path.trim();
-            let p = if p.is_empty() {
-                config::default_models_dir().join("vosk")
-            } else {
-                std::path::PathBuf::from(p)
-            };
-            if !p.exists() {
-                missing.push(format!("STT=vosk 模型不存在: {}", p.display()));
-            }
-        }
-        _ => {}
-    }
-    match cfg.translate.provider.as_str() {
-        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
-            missing.push("翻译=openai 需要 OPENAI_API_KEY".to_string())
-        }
-        "gemini" if std::env::var("GEMINI_API_KEY").is_err() => {
-            missing.push("翻译=gemini 需要 GEMINI_API_KEY".to_string())
-        }
-        "qwen" if std::env::var("DASHSCOPE_API_KEY").is_err() => {
-            missing.push("翻译=qwen 需要 DASHSCOPE_API_KEY".to_string())
-        }
-        "custom" if std::env::var("CUSTOM_API_KEY").is_err() => {
-            missing.push("翻译=custom 需要 CUSTOM_API_KEY".to_string())
-        }
-        _ => {}
-    }
-    match cfg.tts.provider.as_str() {
-        "openai" if std::env::var("OPENAI_API_KEY").is_err() => {
-            missing.push("TTS=openai 需要 OPENAI_API_KEY".to_string())
-        }
-        "sherpa" => {
-            let d = if cfg.tts.model_dir.trim().is_empty() {
-                config::default_models_dir().join("tts")
-            } else {
-                std::path::PathBuf::from(cfg.tts.model_dir.trim())
-            };
-            if !d.exists() {
-                missing.push(format!("TTS=sherpa 模型目录不存在: {}", d.display()));
-            }
-        }
-        _ => {}
-    }
-    match cfg.realtime.provider.as_str() {
-        "gemini-live" if std::env::var("GEMINI_API_KEY").is_err() => {
-            missing.push("实时=gemini-live 需要 GEMINI_API_KEY".to_string())
-        }
-        "palabra" if std::env::var("PALABRA_API_KEY").is_err() => {
-            missing.push("实时=palabra 需要 PALABRA_API_KEY".to_string())
-        }
-        "volcengine" => {
-            if std::env::var("VOLC_APP_ID").is_err() {
-                missing.push("实时=volcengine 缺少 VOLC_APP_ID".to_string());
-            }
-            if std::env::var("VOLC_ACCESS_TOKEN").is_err() {
-                missing.push("实时=volcengine 缺少 VOLC_ACCESS_TOKEN".to_string());
-            }
-        }
-        _ => {}
-    }
+    let missing = missing_requirements(&cfg);
     if missing.is_empty() {
         println!("  ✓ 所选引擎所需密钥/模型齐全");
     } else {
@@ -455,7 +575,13 @@ fn watch(args: &[String]) -> Result<()> {
 }
 
 
-fn single_instance() -> bool {
+/// 会话编号（设置窗口里可以反复开始/停止）
+static SESSION_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn single_instance() -> bool {
+    if INSTANCE_LISTENER.get().is_some() {
+        return true;
+    }
     match std::net::TcpListener::bind(("127.0.0.1", 47653)) {
         Ok(l) => {
             let _ = INSTANCE_LISTENER.set(l);
@@ -466,7 +592,7 @@ fn single_instance() -> bool {
 }
 fn help() {
     println!(
-        r#"SimulVoice 0.36.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.44.0 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
@@ -504,7 +630,132 @@ fn help() {
     );
 }
 
-fn main() -> Result<()> {
+#[cfg(windows)]
+/// 窗口模式（双击 / settings）把 stdout、stderr 都指到数据目录下的 simulvoice.log。
+///
+/// 窗口进程的标准句柄可能是无效值，也可能是父进程已关闭的管道；后者让 println!/eprintln!
+/// 直接 panic（"failed printing to stderr: 管道正在被关闭"），流水线线程一句没翻就死了。
+/// 写文件既不会崩，出问题时用户也能把日志发出来。超过上限先截断，避免无限增长。
+#[cfg(windows)]
+fn redirect_gui_logs() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    const MAX_LOG: u64 = 5 * 1024 * 1024;
+    let path = paths::data_dir().join("simulvoice.log");
+    let too_big = std::fs::metadata(&path).map(|m| m.len() > MAX_LOG).unwrap_or(false);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(&path);
+    match file {
+        Ok(f) => {
+            // 句柄交给进程的标准输出，生命周期与进程相同，不再关闭
+            let h = f.into_raw_handle();
+            unsafe {
+                SetStdHandle(STD_OUTPUT_HANDLE, h as _);
+                SetStdHandle(STD_ERROR_HANDLE, h as _);
+            }
+            println!("\n===== SimulVoice {} 启动 {} =====", env!("CARGO_PKG_VERSION"), chrono::Local::now());
+        }
+        // 打不开日志文件就把两个句柄都置空：Rust 对空句柄的写入是静默丢弃，不会 panic
+        Err(_) => unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, std::ptr::null_mut());
+            SetStdHandle(STD_ERROR_HANDLE, std::ptr::null_mut());
+        },
+    }
+}
+
+unsafe fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+    // 日志已经被重定向到文件/管道时就不动手：接管成 CONOUT$ 会把日志从用户手里抢走。
+    let valid = |h: windows_sys::Win32::Foundation::HANDLE| {
+        !h.is_null() && h != (-1isize as *mut _)
+    };
+    if valid(GetStdHandle(STD_OUTPUT_HANDLE)) && valid(GetStdHandle(STD_ERROR_HANDLE)) {
+        return;
+    }
+    let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    let mut name: Vec<u16> = "CONOUT$".encode_utf16().collect();
+    name.push(0);
+    let handle = CreateFileW(
+        name.as_ptr(),
+        FILE_GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        std::ptr::null(),
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        std::ptr::null_mut(),
+    );
+    if handle != (-1isize as *mut _) {
+        if !valid(GetStdHandle(STD_OUTPUT_HANDLE)) {
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+        }
+        if !valid(GetStdHandle(STD_ERROR_HANDLE)) {
+            SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+    }
+}
+
+/// 出错时的最后一道提示。双击启动的进程没有控制台、也没有被重定向的 std 句柄，
+/// `?` 走到这里只会默默退出，使用者看到的就是「点了没反应」——所以那种情况弹个原生对话框。
+/// 有管道/文件的场合不弹：调用者自己会读到 stderr，弹窗只会把脚本挂住。
+#[cfg(windows)]
+fn report_fatal(err: &anyhow::Error) {
+    use windows_sys::Win32::System::Console::{GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let text = err
+        .chain()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("Error: {text}");
+    let handle_valid = |h: windows_sys::Win32::Foundation::HANDLE| {
+        !h.is_null() && h != (-1isize as *mut _)
+    };
+    let captured = unsafe {
+        handle_valid(GetStdHandle(STD_OUTPUT_HANDLE)) || handle_valid(GetStdHandle(STD_ERROR_HANDLE))
+    };
+    if captured || !unsafe { GetConsoleWindow() }.is_null() {
+        return;
+    }
+    let caption: Vec<u16> = "SimulVoice".encode_utf16().chain(Some(0)).collect();
+    let body: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn report_fatal(err: &anyhow::Error) {
+    eprintln!("Error: {err:?}");
+}
+
+fn main() -> std::process::ExitCode {
+    match run_cli() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            report_fatal(&e);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_cli() -> Result<()> {
     #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Console::SetConsoleOutputCP(65001);
@@ -535,6 +786,12 @@ fn main() -> Result<()> {
         STOP.store(true, Ordering::SeqCst);
     });
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if !args.is_empty() && args.first().map(|s| s != "settings").unwrap_or(false) {
+        unsafe { attach_parent_console(); }
+    } else {
+        redirect_gui_logs();
+    }
     match args.first().map(String::as_str) {
         Some("say") => say(&args),
         Some("translate") => translate_once(&args),
@@ -562,7 +819,12 @@ fn main() -> Result<()> {
             Some("silero") => models::download_silero(),
             Some("sensevoice") => models::download_sensevoice(),
             Some("zipformer") => models::download_zipformer(),
-            Some("marian") => models::download_marian(),
+            Some("marian") => match args.get(2) {
+                Some(pair) => models::fetch(&format!("marian:{pair}")),
+                None => models::download_marian(),
+            },
+            Some("nllb") => models::download_nllb(),
+            Some("whisper") => models::download_whisper(),
             Some("aec") => models::download_aec(),
             Some("piper") => {
                 let lang = args.get(2).map(String::as_str).unwrap_or("zh");
@@ -582,9 +844,13 @@ fn main() -> Result<()> {
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "今天天气很好".into());
-            let mut primary = translate::build(&cfg.translate)?;
+            let (from, to) = (flag(&args, "--from").unwrap_or_else(|| cfg.languages.mine.clone()),
+                              flag(&args, "--to").unwrap_or_else(|| cfg.languages.theirs.clone()));
+            let mut primary = translate::build(&cfg.translate, &from, &to)?;
+            let t0 = std::time::Instant::now();
             println!("[primary] {}", primary.translate(&text)?);
-            for (lang, mut extra) in build_extras(&cfg) {
+            println!("[耗时] {} ms", t0.elapsed().as_millis());
+            for (lang, mut extra) in build_extras(&cfg, &from) {
                 println!("[{lang}] {}", extra.translate(&text)?);
             }
             Ok(())
@@ -600,12 +866,42 @@ fn main() -> Result<()> {
             let _ = recorder::RECORD_DIR.set(resolve_record_dir(&cfg));
             recorder::set_limit(cfg.ui.record_max_mb);
             recorder::set_flags(cfg.ui.keep_translation, false);
-            let text = args.get(1).cloned().unwrap_or_else(|| "这是一次较长的语音合成测试，用来验证分句与流式播放。".into());
+            let _ = ONNX_PROVIDER.set(cfg.tts.onnx_provider.clone());
+            // 位置参数是文本，跳过带值的开关（否则 `ttstest --config x` 会把 --config 当文本念）
+            let mut words = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if matches!(args[i].as_str(), "--config" | "--out") {
+                    i += 2;
+                    continue;
+                }
+                words.push(args[i].clone());
+                i += 1;
+            }
+            let text = if words.is_empty() {
+                "这是一次较长的语音合成测试，用来验证分句与流式播放。".to_string()
+            } else {
+                words.join(" ")
+            };
+            let tts_cfg = tts_for(&cfg.tts, &cfg.tts.voice, cfg.mine());
+            let sherpa = build_local_tts(&tts_cfg, "ttstest");
+            if cfg.tts.provider == "sherpa" && sherpa.is_none() {
+                return Err(anyhow!("本地 TTS 引擎不可用，检查 [tts] model_dir 下的模型文件"));
+            }
             let mut edge = None;
             let mut cache = std::collections::HashMap::new();
             let (_stream, handle) = sink::open_output(None)?;
             let sink = rodio::Sink::try_new(&handle)?;
-            speak_text(&cfg.tts, None, &mut edge, &mut cache, &sink, None, &mut 0u64, &text)
+            speak_text(
+                &tts_cfg,
+                sherpa.as_ref(),
+                &mut edge,
+                &mut cache,
+                &sink,
+                None,
+                &mut 0u64,
+                &text,
+            )
         }
         Some("palabratest") => palabratest::run(&args),
         Some("volctest") => volctest::run(&args),
@@ -613,7 +909,7 @@ fn main() -> Result<()> {
             let path = flag(&args, "--config")
                 .unwrap_or_else(|| paths::default_config_path().display().to_string());
             let cfg = Config::load(Some(&path))?;
-            ui::run_settings(cfg, path)
+            ui::run_settings(cfg, path, args.iter().any(|a| a == "--start"))
         }
         Some("keys") => match args.get(1).map(String::as_str) {
             Some("encrypt") => {
@@ -666,7 +962,7 @@ fn main() -> Result<()> {
             if args.is_empty() {
                 let cfg = Config::load(None)?;
                 let path = paths::default_config_path().display().to_string();
-                return ui::run_settings(cfg, path);
+                return ui::run_settings(cfg, path, false);
             }
             help();
             Ok(())
@@ -710,9 +1006,23 @@ fn say(args: &[String]) -> Result<()> {
         return tts::speak_sapi(&text, Some(&voice));
     }
     if args.iter().any(|a| a == "--piper") {
-        let dir = config::default_models_dir().join("tts").display().to_string();
-        let engine = tts::SherpaTts::new(&dir)?;
+        let piper_cfg = config::TtsConfig {
+            provider: "sherpa".into(),
+            ..Default::default()
+        };
+        let engine = build_local_tts(&piper_cfg, "say")
+            .ok_or_else(|| anyhow!("本地 Piper 模型加载失败（先运行 simulvoice models piper zh）"))?;
         println!("[tts] Piper (本地)");
+        if let Some(path) = flag(args, "--out") {
+            let (samples, rate) = engine.render(&text, 1.0)?;
+            tts::write_wav(&path, &samples, rate)?;
+            println!(
+                "已写入 {path}（{:.1} 秒，{} Hz）",
+                samples.len() as f32 / rate as f32,
+                rate
+            );
+            return Ok(());
+        }
         return engine.speak(&text, 1.0, None);
     }
     let tts = EdgeTts { voice, rate: "+0%".into() };
@@ -731,7 +1041,7 @@ fn transcribe_file(args: &[String]) -> Result<()> {
     let path = args
         .get(1)
         .cloned()
-        .ok_or_else(|| anyhow!("用法: transcribe <音频文件> [--config <文件>]"))?;
+        .ok_or_else(|| anyhow!("用法: transcribe <音频文件> [--config <文件>] [--inbound]"))?;
     let cfg = Config::load(flag(args, "--config").as_deref())?;
     let _ = ONNX_PROVIDER.set(cfg.dsp.onnx_provider.clone());
     NEURAL_AEC.store(cfg.dsp.neural_aec, Ordering::SeqCst);
@@ -745,7 +1055,21 @@ fn transcribe_file(args: &[String]) -> Result<()> {
     } else {
         cfg.dsp.neural_aec_model.clone()
     });
-    let mut engine = stt::build(&cfg.stt)?;
+    // --inbound：按"对方"那一路的方式识别（自动判语种），并给出是否算"我的语言"
+    let inbound = args.iter().any(|a| a == "--inbound");
+    let mut engine = if inbound {
+        let (e, auto) = stt::build_inbound(&cfg.stt, cfg.mine())?;
+        println!("[stt] 入向，自动判语种={auto}");
+        e
+    } else {
+        stt::build(&cfg.stt)?
+    };
+    let verdict = |t: &str| {
+        if inbound {
+            let own = lang::is_own_language(t, cfg.mine(), cfg.theirs());
+            println!("[判定] {}", if own { "我的语言 → 不翻译" } else { "对方语言 → 翻译" });
+        }
+    };
     let file = std::fs::File::open(&path)?;
     let decoder = rodio::Decoder::new(std::io::BufReader::new(file))?;
     let rate = decoder.sample_rate();
@@ -773,8 +1097,11 @@ fn transcribe_file(args: &[String]) -> Result<()> {
     for chunk in pcm.chunks(1600) {
         engine.feed(chunk)?;
     }
+    let t0 = std::time::Instant::now();
     if let Some(t) = engine.end_utterance()? {
         println!("{t}");
+        println!("[stt] 用时 {} ms", t0.elapsed().as_millis());
+        verdict(&t);
     }
     if let Some(t) = engine.flush() {
         println!("{t}");
@@ -844,12 +1171,15 @@ fn vad_check(args: &[String]) -> Result<()> {
 }
 
 fn translate_once(args: &[String]) -> Result<()> {
-    let to = flag(args, "--to");
     let mut text = Vec::new();
     let mut i = 1;
     while i < args.len() {
-        if matches!(args[i].as_str(), "--to" | "--config" | "--provider") {
+        if matches!(args[i].as_str(), "--to" | "--from" | "--config" | "--provider") {
             i += 2;
+            continue;
+        }
+        if args[i] == "--bench" {
+            i += 1;
             continue;
         }
         text.push(args[i].clone());
@@ -857,21 +1187,37 @@ fn translate_once(args: &[String]) -> Result<()> {
     }
     let text = text.join(" ");
     if text.trim().is_empty() {
-        return Err(anyhow!("translate: 需要文本"));
+        return Err(anyhow!("用法: translate <文本> [--from en] [--to zh] [--provider local] [--config 文件]"));
     }
-    let mut cfg = if let Some(path) = flag(args, "--config") {
-        Config::load(Some(&path))?.translate
-    } else {
-        config::TranslateConfig::default()
-    };
-    if let Some(to) = to {
-        cfg.target = to;
-    }
+    let cfg = Config::load(flag(args, "--config").as_deref())?;
+    let mut tcfg = cfg.translate.clone();
     if let Some(p) = flag(args, "--provider") {
-        cfg.provider = p;
+        tcfg.provider = p;
     }
-    let mut tr = translate::build(&cfg)?;
-    println!("{}", tr.translate(&text)?);
+    // 默认方向 = 入向（对方 → 我）
+    let from = flag(args, "--from").unwrap_or_else(|| cfg.languages.theirs.clone());
+    let to = flag(args, "--to").unwrap_or_else(|| cfg.languages.mine.clone());
+    let t0 = std::time::Instant::now();
+    let mut tr = translate::build(&tcfg, &from, &to)?;
+    let load = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let out = tr.translate(&text)?;
+    println!("{out}");
+    eprintln!(
+        "[耗时] 加载 {} ms，翻译 {} ms",
+        load.as_millis(),
+        t1.elapsed().as_millis()
+    );
+    // --bench：同一模型再翻几次，看去掉冷启动后的稳定延迟
+    if args.iter().any(|a| a == "--bench") {
+        let mut v = Vec::new();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            tr.translate(&text)?;
+            v.push(t.elapsed().as_millis());
+        }
+        eprintln!("[耗时] 热启动 {:?} ms", v);
+    }
     Ok(())
 }
 
@@ -920,6 +1266,8 @@ struct Pipe {
     monitor_translation: bool,
     subs: Option<ui::Shared>,
     seconds: Option<u64>,
+    /// 入向：(我的语言, 对方语言)。识别结果是我的语言时只显示原文，不翻译不朗读
+    own_lang: Option<(&'static lang::Lang, &'static lang::Lang)>,
 }
 
 fn start_ref(
@@ -1074,26 +1422,7 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
         let tts_sink = tts_sink_thread.clone();
         let monitor = monitor_sink_thread.clone();
         std::thread::spawn(move || {
-            let sherpa = if tts_cfg.provider == "sherpa" {
-                let dir = if tts_cfg.model_dir.trim().is_empty() {
-                    config::default_models_dir().join("tts").display().to_string()
-                } else {
-                    tts_cfg.model_dir.clone()
-                };
-                match tts::SherpaTts::with_options(
-                    &dir,
-                    &tts_cfg.onnx_provider,
-                    tts_cfg.threads,
-                ) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        eprintln!("[{}] {e}", label);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+            let sherpa = build_local_tts(&tts_cfg, label);
             let mut edge_conn: Option<edge_tts::EdgeTtsConn> = None;
             let mut tts_cache: std::collections::HashMap<String, Vec<u8>> =
                 std::collections::HashMap::new();
@@ -1125,6 +1454,21 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
         });
         while let Ok(text) = text_rx.recv() {
             println!("[{}] 原文: {text}", p.label);
+            if let Some((mine, theirs)) = p.own_lang {
+                if lang::is_own_language(&text, mine, theirs) {
+                    // 同事说的是我的语言：听得懂，不必翻译也不朗读，字幕里照样留原文
+                    println!("[{}] {}，不翻译", p.label, mine.label);
+                    backlog_done();
+                    log_transcript(p.label, &text, "（原话，未翻译）");
+                    if let Some(s) = &p.subs {
+                        if let Ok(mut g) = s.lock() {
+                            g.set_in(text.clone(), text.clone());
+                            g.push_own(text.clone());
+                        }
+                    }
+                    continue;
+                }
+            }
             if let Some(s) = &p.subs {
                 if let Ok(mut g) = s.lock() {
                     if p.outbound {
@@ -1138,6 +1482,13 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("[{}] 翻译失败: {e}", p.label);
+                    // 这句不会进朗读队列了，积压计数要还回去，否则界面一直显示"积压"
+                    backlog_done();
+                    if let Some(s) = &p.subs {
+                        if let Ok(mut g) = s.lock() {
+                            g.set_notice(format!("翻译失败：{e}"));
+                        }
+                    }
                     continue;
                 }
             };
@@ -1150,6 +1501,7 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
                     } else {
                         g.set_in(String::new(), translated.clone())
                     }
+                    g.push_history(p.outbound, text.clone(), translated.clone());
                 }
             }
             if speech_tx.send(translated.clone()).is_err() {
@@ -1315,21 +1667,25 @@ fn interpreter_instruction(target: &str, glossary: &str) -> String {
     )
 }
 
-fn build_extras(cfg: &Config) -> Vec<(String, Box<dyn translate::Translator>)> {
+/// 额外字幕语言（只显示不朗读）。`from` 是该方向说话人的语言。
+fn build_extras(cfg: &Config, from: &str) -> Vec<(String, Box<dyn translate::Translator>)> {
     let mut out = Vec::new();
     for target in &cfg.translate.extra_targets {
         let target = target.trim();
         if target.is_empty() {
             continue;
         }
-        let mut c = cfg.translate.clone();
-        c.target = target.to_string();
-        match translate::build(&c) {
+        match translate::build(&cfg.translate, from, target) {
             Ok(tr) => out.push((target.to_string(), tr)),
             Err(e) => eprintln!("[extras] {target}: {e}"),
         }
     }
     out
+}
+
+/// 一句话已经处理完（念完、跳过或失败），积压计数减一
+fn backlog_done() {
+    let _ = TTS_BACKLOG.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 fn enqueue_text(tx: &std::sync::mpsc::Sender<String>, text: String, label: &str) {
@@ -1406,6 +1762,28 @@ impl Drop for DuckGuard {
     fn drop(&mut self) {
         if self.active {
             crate::ducking::restore();
+        }
+    }
+}
+
+/// 本地 Piper（sherpa-onnx VITS）引擎。provider 不是 sherpa、或模型加载失败时返回 None，
+/// 由调用方按「没有本地引擎」处理。
+fn build_local_tts(cfg: &config::TtsConfig, label: &str) -> Option<tts::SherpaTts> {
+    if cfg.provider != "sherpa" {
+        return None;
+    }
+    let dir = if cfg.model_dir.trim().is_empty() {
+        local_tts_dir("", lang::find("zh").expect("zh"))
+            .display()
+            .to_string()
+    } else {
+        cfg.model_dir.clone()
+    };
+    match tts::SherpaTts::with_options(&dir, &cfg.onnx_provider, cfg.threads) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[{label}] {e}");
+            None
         }
     }
 }
@@ -2079,6 +2457,31 @@ fn resolve_record_dir(cfg: &config::Config) -> String {
 
 fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     let cfg = Config::load(config_path)?;
+    run_session(cfg, seconds, None)
+}
+
+/// 跑一次同传会话，直到 STOP 置位或到时。
+///
+/// `embedded` 非空时由设置窗口内嵌调用：字幕写进窗口自己的状态，不另开悬浮窗，
+/// 并且一定等两路线程都退出才返回，窗口才能安全地再次「开始」。
+pub(crate) fn run_session(
+    mut cfg: Config,
+    seconds: Option<u64>,
+    embedded: Option<ui::Shared>,
+) -> Result<()> {
+    if cfg.audio.input == "pid" && !cfg.audio.process.trim().is_empty() {
+        match capture::find_pid(&cfg.audio.process) {
+            Some(pid) => cfg.audio.pid = pid,
+            None => {
+                eprintln!(
+                    "[警告] 没找到正在运行的 {}，改为采集整个电脑的声音",
+                    cfg.audio.process
+                );
+                cfg.audio.input = "loopback".into();
+                cfg.audio.pid = 0;
+            }
+        }
+    }
     println!(
         "[配置] stt={} translate={} tts={} realtime={} duplex={}",
         cfg.stt.provider,
@@ -2086,6 +2489,16 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         cfg.tts.provider,
         cfg.realtime.provider,
         cfg.audio.duplex
+    );
+    println!(
+        "[语言] 对方说{} → 译成{}给你听{}",
+        cfg.theirs().label,
+        cfg.mine().label,
+        if cfg.audio.duplex && cfg.audio.mode == "both" {
+            format!("；你说{} → 译成{}给对方", cfg.mine().label, cfg.theirs().label)
+        } else {
+            String::new()
+        }
     );
     let live_palabra = cfg.realtime.provider == "palabra";
     let live_volc = cfg.realtime.provider == "volcengine";
@@ -2146,6 +2559,24 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     MUTE_OUT.store(cfg.audio.mute_outbound, Ordering::SeqCst);
     JUMP_SECS.store(cfg.audio.backlog_jump_secs, Ordering::SeqCst);
     QUEUE_LIMIT.store((cfg.audio.queue_limit.max(1)) as usize, Ordering::SeqCst);
+    // 启动前拦截：缺密钥/缺模型的配置一启动就说明白，别等到"什么都没发生"。
+    // 实时引擎自带识别与翻译，那两段配置不参与校验。
+    let mut problems = missing_requirements(&cfg);
+    if live_mode {
+        problems.retain(|p| p.starts_with("实时="));
+    }
+    if !problems.is_empty() {
+        let mut msg = String::from("启动前检查未通过：");
+        for p in &problems {
+            msg.push_str("\n  ✗ ");
+            msg.push_str(p);
+        }
+        msg.push_str(
+            "\n\n全本地方案：stt=\"local\"（SenseVoice/Whisper），翻译=\"local\"（Marian/NLLB），TTS=\"edge\" 或 \"sherpa\"。\
+             \n运行 simulvoice doctor 查看设备与密钥详情。",
+        );
+        return Err(anyhow!(msg));
+    }
     let live_app_key = if live_volc {
         Some(std::env::var("VOLC_APP_ID").map_err(|_| anyhow!("VOLC_APP_ID 未设置"))?)
     } else {
@@ -2187,20 +2618,41 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
                 ));
             }
         }
+    } else if cfg.audio.input == "loopback" {
+        // 输出设备留空 = 播到系统默认输出，而回环采集的正是同一台设备：
+        // 译文会被自己重新识别，字幕与声音都会滚成一团。这里必须出声提醒。
+        let def = sink::default_output_name().unwrap_or_else(|| "系统默认输出".into());
+        eprintln!(
+            "[警告] 采集的是默认输出设备（{def}），译文也播在它上面，会被再次识别形成自激。\
+             \n         接耳机后把 output_device 设为耳机，或把 input 改成 \"pid\" 只采集会议进程。"
+        );
     }
 
+    if cfg.audio.input == "pid" && cfg.audio.pid == 0 {
+        eprintln!(
+            "[警告] input=\"pid\" 但 pid=0，已退回采集系统默认输出设备；\
+             请在设置面板「会议进程」里选一次，或填 [audio] pid"
+        );
+    }
     let pid = if cfg.audio.input == "pid" && cfg.audio.pid > 0 {
         Some(cfg.audio.pid)
     } else {
         None
     };
-    let subs = if cfg.ui.subtitles { Some(ui::new_state()) } else { None };
+    let subs = match &embedded {
+        Some(s) => Some(s.clone()),
+        None if cfg.ui.subtitles => Some(ui::new_state()),
+        None => None,
+    };
+    let overlay = embedded.is_none();
 
-    // 入向：对方 → 你
-    std::thread::spawn(|| {
+    // 看门狗只管本次会话：窗口里停止后再开始，旧看门狗看到会话号变了就退出
+    capture::reset_tick();
+    let session = SESSION_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(5));
-            if STOP.load(Ordering::SeqCst) {
+            if STOP.load(Ordering::SeqCst) || SESSION_GEN.load(Ordering::SeqCst) != session {
                 break;
             }
             let last = capture::last_tick();
@@ -2218,6 +2670,25 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         }
     });
 
+    // 对方那一路要能认出"我的语言"（同事插话），识别改成自动判语种
+    let (in_stt, in_auto) = if live_mode {
+        (stt::SttEngine::None, false)
+    } else if cfg.audio.skip_own_language {
+        stt::build_inbound(&cfg.stt, cfg.mine())?
+    } else {
+        (stt::build(&cfg.stt)?, false)
+    };
+    let own_lang = (!live_mode && cfg.audio.skip_own_language)
+        .then(|| (cfg.mine(), cfg.theirs()))
+        .filter(|(m, t)| lang::distinguishable(m, t));
+    if let Some((m, t)) = own_lang {
+        let note = if in_auto {
+            String::new()
+        } else {
+            format!("（当前识别引擎固定按{}识别，可能认不出）", t.label)
+        };
+        eprintln!("[对方] 听到{}时只显示原文{note}", m.label);
+    }
     let inbound = Pipe {
         label: "对方",
         source: if cfg.audio.input == "mic" {
@@ -2229,17 +2700,13 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         } else {
             capture::Source::Loopback(None)
         },
-        stt: if live_mode {
-            stt::SttEngine::None
-        } else {
-            stt::build(&cfg.stt)?
-        },
+        stt: in_stt,
         translator: if live_mode {
             Box::new(translate::PassThroughTranslator)
         } else {
-            translate::build(&cfg.translate)?
+            translate::build(&cfg.translate, &cfg.languages.theirs, &cfg.languages.mine)?
         },
-        extras: if live_mode { Vec::new() } else { build_extras(&cfg) },
+        extras: if live_mode { Vec::new() } else { build_extras(&cfg, &cfg.languages.theirs) },
         realtime: if live_mode {
             Some(RealtimePipe {
                 provider: cfg.realtime.provider.clone(),
@@ -2270,12 +2737,12 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
                 } else {
                     None
                 },
-                extras: build_extras(&cfg),
+                extras: build_extras(&cfg, &cfg.languages.theirs),
             })
         } else {
             None
         },
-        tts: cfg.tts.clone(),
+        tts: tts_for(&cfg.tts, &cfg.tts.voice, cfg.mine()),
         out_device: cfg.audio.output_device.clone(),
         outbound: false,
         vad: (
@@ -2309,10 +2776,11 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         monitor_translation: cfg.audio.monitor_translation,
         subs: subs.clone(),
         seconds,
+        own_lang,
     };
 
     if !duplex && !speak_only {
-        if let Some(state) = subs {
+        if let (Some(state), true) = (subs.clone(), overlay) {
             let h = std::thread::spawn(move || run_pipeline(inbound));
             ui::run(state, seconds.map(Duration::from_secs))?;
             let _ = h.join();
@@ -2326,8 +2794,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
     out_stt_cfg.language = cfg.stt.language_reverse.clone();
     let mut out_tr_cfg = cfg.translate.clone();
     out_tr_cfg.target = cfg.translate.target_reverse.clone();
-    let mut out_tts_cfg = cfg.tts.clone();
-    out_tts_cfg.voice = cfg.tts.voice_reverse.clone();
+    let out_tts_cfg = tts_for(&cfg.tts, &cfg.tts.voice_reverse, cfg.theirs());
 
     if cfg.audio.remote_output_device.trim().is_empty() {
         eprintln!("[警告] duplex=true 但 remote_output_device 为空，译文会走默认设备，可能被再次采集。建议填 \"CABLE\"。");
@@ -2370,9 +2837,9 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         translator: if live_mode {
             Box::new(translate::PassThroughTranslator)
         } else {
-            translate::build(&out_tr_cfg)?
+            translate::build(&out_tr_cfg, &cfg.languages.mine, &cfg.languages.theirs)?
         },
-        extras: if live_mode { Vec::new() } else { build_extras(&cfg) },
+        extras: if live_mode { Vec::new() } else { build_extras(&cfg, &cfg.languages.mine) },
         realtime: if live_mode {
             Some(RealtimePipe {
                 provider: cfg.realtime.provider.clone(),
@@ -2403,7 +2870,7 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
                 } else {
                     None
                 },
-                extras: build_extras(&cfg),
+                extras: build_extras(&cfg, &cfg.languages.mine),
             })
         } else {
             None
@@ -2442,10 +2909,11 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         monitor_translation: cfg.audio.monitor_translation,
         subs: subs.clone(),
         seconds,
+        own_lang: None,
     };
 
     if speak_only {
-        if let Some(state) = subs {
+        if let (Some(state), true) = (subs.clone(), overlay) {
             let h = std::thread::spawn(move || run_pipeline(outbound));
             ui::run(state, seconds.map(Duration::from_secs))?;
             let _ = h.join();
@@ -2454,20 +2922,43 @@ fn run(config_path: Option<&str>, seconds: Option<u64>) -> Result<()> {
         return run_pipeline(outbound);
     }
 
-    if let Some(state) = subs {
+    if let (Some(state), true) = (subs.clone(), overlay) {
         let _a = std::thread::spawn(move || run_pipeline(inbound));
         let _b = std::thread::spawn(move || run_pipeline(outbound));
         ui::run(state, seconds.map(Duration::from_secs))?;
         return Ok(());
     }
 
-    let a = std::thread::spawn(move || run_pipeline(inbound));
-    let b = std::thread::spawn(move || run_pipeline(outbound));
-    let ra = a.join().map_err(|_| anyhow!("入向线程崩溃"))?;
-    let rb = b.join().map_err(|_| anyhow!("出向线程崩溃"))?;
-    ra?;
-    rb
+    // 一路出错就让另一路也停下，否则界面显示「运行中」而实际只剩半边在工作
+    let a = std::thread::spawn(move || {
+        let r = run_pipeline(inbound);
+        if r.is_err() {
+            STOP.store(true, Ordering::SeqCst);
+        }
+        r
+    });
+    let b = std::thread::spawn(move || {
+        let r = run_pipeline(outbound);
+        if r.is_err() {
+            STOP.store(true, Ordering::SeqCst);
+        }
+        r
+    });
+    let ra = a.join().map_err(|_| anyhow!("入向线程崩溃"));
+    let rb = b.join().map_err(|_| anyhow!("出向线程崩溃"));
+    ra??;
+    rb?
 }
+
+
+
+
+
+
+
+
+
+
 
 
 

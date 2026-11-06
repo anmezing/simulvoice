@@ -146,12 +146,12 @@ fn balloon(title: &str, text: &str) {
     }
 }
 
-/// 32×32 应用图标（和窗口图标同一张图，见 ui::app_icon_rgba）
+/// 32×32 应用图标（和窗口、exe 图标同一张图，见 icon.rs）
 unsafe fn make_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
     use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, LoadIconW, ICONINFO, IDI_APPLICATION};
     let size = 32u32;
-    let rgba = crate::ui::app_icon_rgba(size);
+    let rgba = crate::icon::app_icon_rgba(size);
     let bgra: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
     let mask = vec![0u8; (size * size / 8) as usize];
     let color = CreateBitmap(size as i32, size as i32, 1, 32, bgra.as_ptr() as _);

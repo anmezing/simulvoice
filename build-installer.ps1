@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item "target\release\simulvoice.exe" $stage
 if (Test-Path "target\release\onnxruntime_marian.dll") { Copy-Item "target\release\onnxruntime_marian.dll" $stage }
 Copy-Item "README.md" $stage
+& "target\release\simulvoice.exe" write-icon "$stage\simulvoice.ico"
+if ($LASTEXITCODE -ne 0) { throw "write-icon failed" }
 Set-Content -Path "$stage\simulvoice.data-dir" -Value "data" -Encoding ascii -NoNewline
 
 & $Iscc "simulvoice.iss"

@@ -15,6 +15,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\simulvoice.exe
+SetupIconFile=dist\stage\simulvoice.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -33,7 +34,7 @@ Source: "dist\stage\simulvoice.data-dir"; DestDir: "{app}"; Flags: onlyifdoesnte
 
 [Icons]
 Name: "{group}\SimulVoice"; Filename: "{app}\simulvoice.exe"
-Name: "{group}\Uninstall SimulVoice"; Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallProgram,SimulVoice}"; Filename: "{uninstallexe}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 31
 Name: "{autodesktop}\SimulVoice"; Filename: "{app}\simulvoice.exe"; Tasks: desktopicon
 
 [Run]

@@ -10,6 +10,7 @@ mod ducking;
 mod edge_tts;
 mod gemini_live;
 mod hotkeys;
+mod icon;
 mod http;
 mod keys;
 mod livetest;
@@ -803,6 +804,12 @@ fn run_cli() -> Result<()> {
         Some("transcribe") => transcribe_file(&args),
         #[cfg(windows)]
         Some("crashtest") => crashdump::crash_now(),
+        // 打包用：把应用图标写成 .ico（安装程序的图标）
+        Some("write-icon") => {
+            let path = args.get(1).ok_or_else(|| anyhow!("用法: write-icon <文件.ico>"))?;
+            std::fs::write(path, icon::ico_file())?;
+            Ok(())
+        }
         Some("--version") | Some("-V") | Some("version") => {
             println!("SimulVoice {}", env!("CARGO_PKG_VERSION"));
             Ok(())

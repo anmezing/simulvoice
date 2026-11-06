@@ -573,10 +573,13 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(600.0),
             ])
-            .with_min_inner_size([400.0, 460.0]),
+            .with_min_inner_size([400.0, 460.0])
+            .with_icon(egui::IconData { rgba: app_icon_rgba(64), width: 64, height: 64 }),
         ..Default::default()
     };
-    eframe::run_native(
+    #[cfg(windows)]
+    crate::tray::start();
+    let result = eframe::run_native(
         "simulvoice settings",
         options,
         Box::new(move |cc| {
@@ -603,12 +606,71 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                 snapshot: Snapshot::from_env(),
                 // SIMULVOICE_UI_ADVANCED=1：截图检查时默认展开
                 show_advanced: std::env::var("SIMULVOICE_UI_ADVANCED").is_ok(),
+                hwnd_registered: false,
             };
             app.auto_pick_meeting();
             Ok(Box::new(app))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("窗口启动失败: {e}"))
+    .map_err(|e| anyhow::anyhow!("窗口启动失败: {e}"));
+    #[cfg(windows)]
+    crate::tray::shutdown();
+    result
+}
+
+/// 应用图标（窗口、任务栏、托盘共用这一张）：墨黑圆角方块 + 白色声波条。
+/// 直接画出来，不用另带图标文件。返回 RGBA（非预乘）。
+pub fn app_icon_rgba(size: u32) -> Vec<u8> {
+    let s = size as f32;
+    let radius = s * 0.24;
+    // 五根竖条，高度对称起伏
+    let heights = [0.26f32, 0.46, 0.62, 0.46, 0.26];
+    let bar_w = s * 0.09;
+    let gap = s * 0.06;
+    let total = heights.len() as f32 * bar_w + (heights.len() - 1) as f32 * gap;
+    let x0 = (s - total) / 2.0;
+    let inside_rect = |x: f32, y: f32| {
+        let cx = x.clamp(radius, s - radius);
+        let cy = y.clamp(radius, s - radius);
+        (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
+    };
+    let inside_bar = |x: f32, y: f32| {
+        heights.iter().enumerate().any(|(i, h)| {
+            let r = bar_w / 2.0;
+            let cx = x0 + i as f32 * (bar_w + gap) + r;
+            let half = (h * s / 2.0 - r).max(0.0);
+            let dy = (y - s / 2.0).abs() - half;
+            let dy = dy.max(0.0);
+            (x - cx).powi(2) + dy * dy <= r * r
+        })
+    };
+    const SS: usize = 4; // 每像素 4×4 采样做抗锯齿
+    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    for py in 0..size {
+        for px in 0..size {
+            let (mut a, mut white) = (0usize, 0usize);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
+                    if inside_rect(x, y) {
+                        a += 1;
+                        if inside_bar(x, y) {
+                            white += 1;
+                        }
+                    }
+                }
+            }
+            if a == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let t = white as f32 / a as f32;
+            let mix = |ink: u8| (ink as f32 + (255.0 - ink as f32) * t).round() as u8;
+            out.extend_from_slice(&[mix(INK.r()), mix(INK.g()), mix(INK.b()), (a * 255 / (SS * SS)) as u8]);
+        }
+    }
+    out
 }
 
 struct SettingsApp {
@@ -627,6 +689,8 @@ struct SettingsApp {
     autostart: bool,
     snapshot: Option<Snapshot>,
     show_advanced: bool,
+    /// 主窗口句柄已登记给托盘
+    hwnd_registered: bool,
 }
 
 /// 开发用：设 SIMULVOICE_UI_SNAPSHOT=<文件.bmp>，窗口启动若干秒后（SIMULVOICE_UI_SNAPSHOT_DELAY，
@@ -1367,6 +1431,7 @@ impl SettingsApp {
             ui.checkbox(&mut self.cfg.audio.skip_own_language, own_label);
             ui.checkbox(&mut self.cfg.ui.keep_translation, "保存译文语音（Ctrl+Alt+F6 回放）");
             ui.checkbox(&mut self.cfg.ui.record_source, "录制原始声音");
+            ui.checkbox(&mut self.cfg.ui.minimize_to_tray, "最小化时收到右下角托盘");
             ui.horizontal(|ui| {
                 ui.label("额外字幕语言");
                 ui.add(
@@ -1412,7 +1477,22 @@ impl SettingsApp {
 }
 
 impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        {
+            if !self.hwnd_registered {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(h) = frame.window_handle() {
+                    if let RawWindowHandle::Win32(w) = h.as_raw() {
+                        crate::tray::set_main_window(w.hwnd.get());
+                        self.hwnd_registered = true;
+                    }
+                }
+            }
+            crate::tray::MINIMIZE_TO_TRAY.store(self.cfg.ui.minimize_to_tray, Ordering::Relaxed);
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         if let Some(snap) = &mut self.snapshot {
             if snap.tick(ctx) {
                 crate::STOP.store(true, Ordering::SeqCst);
@@ -1423,6 +1503,8 @@ impl eframe::App for SettingsApp {
             // 关窗口 = 停止翻译；不在这里阻塞等待，进程退出会结束后台线程
             crate::STOP.store(true, Ordering::SeqCst);
             let _ = self.save();
+            #[cfg(windows)]
+            crate::tray::shutdown();
         }
         if std::mem::take(&mut self.autostart) && self.phase() == Phase::Idle {
             self.start();
@@ -1460,5 +1542,32 @@ impl eframe::App for SettingsApp {
                         });
                 });
             });
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn icon_shape() {
+        let n = 32u32;
+        let px = super::app_icon_rgba(n);
+        assert_eq!(px.len(), (n * n * 4) as usize);
+        let at = |x: u32, y: u32| &px[((y * n + x) * 4) as usize..((y * n + x) * 4 + 4) as usize];
+        assert_eq!(at(0, 0)[3], 0, "圆角外透明");
+        assert_eq!(at(n / 2, n / 2)[0], 255, "中间是白色声波条");
+        assert_eq!(at(3, n / 2)[3], 255, "边上是不透明的墨色底");
+        // SIMULVOICE_ICON_DUMP=<文件.ppm>：导出 256px 预览
+        if let Ok(path) = std::env::var("SIMULVOICE_ICON_DUMP") {
+            let s = 256u32;
+            let big = super::app_icon_rgba(s);
+            let mut out = format!("P6 {s} {s} 255\n").into_bytes();
+            for p in big.chunks_exact(4) {
+                let a = p[3] as u32;
+                for c in &p[..3] {
+                    out.push(((*c as u32 * a + 255 * (255 - a)) / 255) as u8);
+                }
+            }
+            std::fs::write(path, out).unwrap();
+        }
     }
 }

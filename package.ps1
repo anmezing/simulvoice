@@ -61,7 +61,6 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item "target\release\simulvoice.exe" $dist -Force
 Copy-Item "target\release\onnxruntime_marian.dll" $dist -Force
 Copy-Item "README.md" $dist -Force
-if (Test-Path "examples\simulvoice.toml") { Copy-Item "examples\simulvoice.toml" "$dist\simulvoice.toml" -Force }
 if ($DirectML) {
     Get-ChildItem "target\release" -Filter "*.dll" | Copy-Item -Destination $dist -Force
 }

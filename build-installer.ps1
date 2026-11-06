@@ -22,12 +22,11 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item "target\release\simulvoice.exe" $stage
 if (Test-Path "target\release\onnxruntime_marian.dll") { Copy-Item "target\release\onnxruntime_marian.dll" $stage }
 Copy-Item "README.md" $stage
-if (Test-Path "examples\simulvoice.toml") { Copy-Item "examples\simulvoice.toml" "$stage\simulvoice.toml" }
 Set-Content -Path "$stage\simulvoice.data-dir" -Value "data" -Encoding ascii -NoNewline
 
 & $Iscc "simulvoice.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-Write-Host "Installer: dist\SimulVoiceSetup-0.44.0.exe"
+Write-Host "Installer: dist\SimulVoiceSetup-0.45.0.exe"
 
 
 

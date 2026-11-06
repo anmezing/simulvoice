@@ -70,6 +70,13 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$dist\*" -DestinationPath $zip -Force
 Write-Host "Portable: $zip"
 
+# Keep symbols per version (not shipped): needed to read crash dumps users send back
+$sym = Join-Path $PSScriptRoot "dist\symbols\$version$suffix"
+New-Item -ItemType Directory -Force -Path $sym | Out-Null
+Copy-Item "target\release\simulvoice.pdb" $sym -Force
+Copy-Item "target\release\simulvoice.exe" $sym -Force
+Write-Host "Symbols: $sym"
+
 if (-not $SkipInstaller -and -not $DirectML) {
     try {
         & (Join-Path $PSScriptRoot "build-installer.ps1")

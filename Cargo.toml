@@ -41,11 +41,13 @@ tar = "0.4"
 bzip2 = "0.4"
 rubato = "0.15"
 ctrlc = "3"
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_Accessibility"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
 raw-window-handle = "0.6"
 fs2 = "0.4"
 
 [profile.release]
+# 行号级调试信息只进 simulvoice.pdb，不增大 exe；崩溃 dump 靠它定位到源码行
+debug = "line-tables-only"
 lto = "thin"
 strip = true
 codegen-units = 1

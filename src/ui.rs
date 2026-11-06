@@ -618,6 +618,22 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
     result
 }
 
+/// 绿色对勾 + 一行说明。勾是画出来的：内置字体（微软雅黑 + egui 默认字体）里没有 ✓，会显示成方框
+fn ok_line(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+        let c = rect.center();
+        let pts = vec![
+            c + egui::vec2(-4.0, 0.2),
+            c + egui::vec2(-1.3, 3.0),
+            c + egui::vec2(4.2, -3.2),
+        ];
+        ui.painter().add(egui::Shape::line(pts, Stroke::new(1.7, OK_GREEN)));
+        ui.label(RichText::new(text).size(12.0).color(OK_GREEN));
+    });
+}
+
 /// 应用图标（窗口、任务栏、托盘共用这一张）：墨黑圆角方块 + 白色声波条。
 /// 直接画出来，不用另带图标文件。返回 RGBA（非预乘）。
 pub fn app_icon_rgba(size: u32) -> Vec<u8> {
@@ -1032,13 +1048,7 @@ impl SettingsApp {
             ui.label(RichText::new(desc).size(12.0).color(MUTED));
             if self.cfg.audio.duplex {
                 match cable_device(&self.outputs) {
-                    Some(_) => {
-                        ui.label(
-                            RichText::new("✓ 已检测到虚拟麦克风：在会议软件里把麦克风选成 CABLE Output")
-                                .size(12.0)
-                                .color(OK_GREEN),
-                        );
-                    }
+                    Some(_) => ok_line(ui, "已检测到虚拟麦克风：在会议软件里把麦克风选成 CABLE Output"),
                     None => hint_box(
                         ui,
                         "让对方听到你的译音，需要先装免费的虚拟麦克风 VB-CABLE（装好后重启本程序）。\

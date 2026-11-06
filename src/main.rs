@@ -3,6 +3,8 @@ mod aec;
 mod audio_out;
 mod capture;
 mod config;
+#[cfg(windows)]
+mod crashdump;
 mod dsp;
 mod ducking;
 mod edge_tts;
@@ -792,10 +794,15 @@ fn run_cli() -> Result<()> {
     } else {
         redirect_gui_logs();
     }
+    // 放在日志重定向之后：上次崩溃的提示要写进 simulvoice.log
+    #[cfg(windows)]
+    crashdump::install();
     match args.first().map(String::as_str) {
         Some("say") => say(&args),
         Some("translate") => translate_once(&args),
         Some("transcribe") => transcribe_file(&args),
+        #[cfg(windows)]
+        Some("crashtest") => crashdump::crash_now(),
         Some("--version") | Some("-V") | Some("version") => {
             println!("SimulVoice {}", env!("CARGO_PKG_VERSION"));
             Ok(())

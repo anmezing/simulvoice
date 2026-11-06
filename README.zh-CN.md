@@ -141,6 +141,28 @@ cargo build --release      # target\release\simulvoice.exe，同目录需要 onn
 - 语音持续且朗读跟不上时，队列满会丢弃句子（`[audio] queue_limit`，默认 32 句）
 - 安装包未做代码签名，首次运行可能被 SmartScreen 提示
 
-## License
+## 许可与授权
 
-MIT
+SimulVoice 采用 [PolyForm Noncommercial License 1.0.0](LICENSE)：
+
+- **免费**：个人使用（学习、研究、个人项目、爱好），以及学校、公益组织、政府机构等非商业组织使用
+- **需要商业授权**：公司或团队在工作中使用、集成到商业产品或服务里、对外提供收费的翻译服务、再分发用于商业目的等任何商业用途
+
+商业授权请在 [GitHub](https://github.com/anmezing) 联系作者，或在仓库提交一个标题为「商业授权」的 Issue。
+
+在本次许可变更之前公开的代码（提交 `fbcb39b` 及更早）仍按当时的 MIT 许可提供。
+
+### 第三方模型的许可
+
+程序会按需下载的模型有各自的许可，与 SimulVoice 本身的授权无关，商业使用时需要分别确认：
+
+| 模型 / 服务 | 用途 | 许可 |
+|---|---|---|
+| NLLB-200 | 小语种翻译兜底 | CC-BY-NC 4.0，**不允许商用** |
+| Marian（opus-mt） | 翻译 | CC-BY 4.0，需注明出处 |
+| Whisper | 识别其他语言 | MIT |
+| SenseVoice | 识别中英日韩粤 | 见 FunASR 的模型许可 |
+| Silero VAD | 语音检测 | MIT |
+| Piper 音色 | 离线朗读 | 每个音色不同，见各音色说明 |
+| Edge 朗读 | 在线朗读 | 微软未公开的接口，不建议商业产品依赖 |
+| VB-CABLE | 虚拟麦克风 | 见 VB-Audio 官网的使用条款 |

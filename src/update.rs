@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// 仓库地址只在 Cargo.toml 的 repository 里写一份
-const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// 自动检查的最短间隔
 const AUTO_INTERVAL_SECS: u64 = 24 * 3600;

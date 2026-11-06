@@ -3,6 +3,7 @@ name = "simulvoice"
 version = "0.45.0"
 edition = "2021"
 repository = "https://github.com/anmezing/simulvoice"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [features]
 default = ["sherpa-static"]

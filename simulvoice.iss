@@ -35,6 +35,7 @@ Source: "dist\stage\simulvoice.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\stage\onnxruntime_marian.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "dist\stage\README.md"; DestDir: "{app}"
 Source: "dist\stage\README.zh-CN.md"; DestDir: "{app}"
+Source: "dist\stage\LICENSE.txt"; DestDir: "{app}"
 Source: "dist\stage\simulvoice.data-dir"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]

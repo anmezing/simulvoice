@@ -62,6 +62,7 @@ Copy-Item "target\release\simulvoice.exe" $dist -Force
 Copy-Item "target\release\onnxruntime_marian.dll" $dist -Force
 Copy-Item "README.md" $dist -Force
 Copy-Item "README.zh-CN.md" $dist -Force
+Copy-Item "LICENSE" "$dist\LICENSE.txt" -Force
 if ($DirectML) {
     Get-ChildItem "target\release" -Filter "*.dll" | Copy-Item -Destination $dist -Force
 }

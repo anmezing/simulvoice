@@ -1196,6 +1196,17 @@ impl SettingsApp {
                 UpdateState::Idle | UpdateState::Checking => {}
             }
             ui.checkbox(&mut self.cfg.ui.check_updates, "打开时自动检查（每天最多一次）");
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new("个人和非商业使用免费，商业使用需要授权 ·").size(12.0).color(MUTED));
+                let link = ui.add(
+                    egui::Label::new(RichText::new("授权说明").size(12.0).color(TEXT).underline())
+                        .sense(egui::Sense::click()),
+                );
+                if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open_url(&format!("{}#license", crate::update::REPO_URL));
+                }
+            });
         });
     }
 

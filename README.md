@@ -145,4 +145,26 @@ The in-app update check reads the latest non-prerelease release. Do not upload `
 
 ## License
 
-MIT
+SimulVoice is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE):
+
+- **Free**: personal use (study, research, personal projects, hobbies) and use by noncommercial organizations such as schools, charities and government institutions
+- **Commercial license required**: use at work by a company or team, integration into a commercial product or service, offering paid interpretation services, redistribution for commercial purposes, or any other commercial use
+
+For a commercial license, contact the author on [GitHub](https://github.com/anmezing) or open an issue titled "Commercial license".
+
+Code published before this license change (commit `fbcb39b` and earlier) remains available under the MIT License it was released with.
+
+### Third-party model licenses
+
+Models downloaded on demand carry their own licenses, independent of SimulVoice's; check them separately for commercial use:
+
+| Model / service | Used for | License |
+|---|---|---|
+| NLLB-200 | fallback translation for less common pairs | CC-BY-NC 4.0, **no commercial use** |
+| Marian (opus-mt) | translation | CC-BY 4.0, attribution required |
+| Whisper | recognition of other languages | MIT |
+| SenseVoice | recognition of zh/en/ja/ko/yue | see FunASR's model license |
+| Silero VAD | voice activity detection | MIT |
+| Piper voices | offline speech | varies per voice; see each voice card |
+| Edge read-aloud | online speech | undocumented Microsoft endpoint; not advisable for commercial products |
+| VB-CABLE | virtual microphone | see VB-Audio's terms of use |

@@ -30,7 +30,7 @@ wasapi = "0.19"
 libloading = "0.8"
 zip = "2"
 dirs = "5"
-windows = { version = "0.61", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.61", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_Foundation"] }
 nnnoiseless = "0.5"
 eframe = "0.29"
 sherpa-onnx = { version = "1.13.8", default-features = false }

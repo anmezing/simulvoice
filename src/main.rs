@@ -6,6 +6,8 @@ mod config;
 #[cfg(windows)]
 mod crashdump;
 mod dsp;
+#[cfg(windows)]
+mod device_mute;
 mod ducking;
 mod edge_tts;
 mod gemini_live;
@@ -799,8 +801,10 @@ fn run_cli() -> Result<()> {
     // 放在日志重定向之后：上次崩溃的提示要写进 simulvoice.log
     #[cfg(windows)]
     crashdump::install();
-    // 上次崩溃时被调低、没来得及恢复的应用音量
+    // 上次崩溃时被调低、没来得及恢复的应用音量 / 被静音的设备
     ducking::recover();
+    #[cfg(windows)]
+    device_mute::recover();
     match args.first().map(String::as_str) {
         Some("say") => say(&args),
         Some("translate") => translate_once(&args),
@@ -1056,6 +1060,51 @@ fn say(args: &[String]) -> Result<()> {
 
 /// 诊断：只打开采集，每秒打印一次音量，不识别不翻译，也不占单实例锁。
 /// `capturetest [--process 名字.exe | --pid N | --mic [设备]] [--seconds S]`，缺省收整个电脑的声音
+/// 只听译文。只在按进程收音（选了会议软件）时可行；整机收音时会议声音和译文必在同一处，做不到
+#[cfg(windows)]
+fn start_translation_only(cfg: &Config, subs: Option<ui::Shared>) -> Option<device_mute::DeviceMute> {
+    if !cfg.audio.translation_only || cfg.audio.mute_inbound || live_mode_of(cfg) {
+        return None;
+    }
+    let notify = move |msg: String| {
+        eprintln!("[只听译文] {msg}");
+        if let Some(s) = &subs {
+            if let Ok(mut g) = s.lock() {
+                g.set_notice(msg);
+            }
+        }
+    };
+    if cfg.audio.input != "pid" || cfg.audio.pid == 0 {
+        notify("只听译文需要在「收听来源」里选会议软件；现在收的是整个电脑的声音，原声没法单独关掉".into());
+        return None;
+    }
+    // 绝不能静音的设备：译文播放、给对方的虚拟麦克风、监听
+    let mut keep = Vec::new();
+    for name in [&cfg.audio.output_device, &cfg.audio.remote_output_device, &cfg.audio.monitor_device] {
+        if name.trim().is_empty() && !std::ptr::eq(name, &cfg.audio.output_device) {
+            continue;
+        }
+        if let Some(d) = device_mute::find_output(name) {
+            keep.push(d);
+        }
+    }
+    Some(device_mute::DeviceMute::start(
+        cfg.audio.pid,
+        keep,
+        Box::new(move |dev: &str| {
+            notify(format!(
+                "只听译文没生效：会议软件和译文都在「{dev}」上播放。请把其中一个换到别的设备：\
+                 会议软件的扬声器改选另一台设备，或在「高级设置 → 声音设备 → 译文播放到」选耳机"
+            ))
+        }),
+    ))
+}
+
+#[cfg(windows)]
+fn live_mode_of(cfg: &Config) -> bool {
+    matches!(cfg.realtime.provider.as_str(), "gemini-live" | "palabra" | "volcengine")
+}
+
 fn capture_test(args: &[String]) -> Result<()> {
     let secs = flag(args, "--seconds").and_then(|s| s.parse::<u64>().ok()).unwrap_or(10).clamp(1, 600);
     // --duck-after N：N 秒后开始"念译文时调低其他声音"（再过 3 秒恢复），检验采集端的音量补偿
@@ -2733,6 +2782,9 @@ pub(crate) fn run_session(
         None if cfg.ui.subtitles => Some(ui::new_state()),
         None => None,
     };
+    // 只听译文：会议软件那台播放设备在翻译期间静音（守卫随本函数返回而恢复）
+    #[cfg(windows)]
+    let _device_mute = start_translation_only(&cfg, subs.clone());
     let overlay = embedded.is_none();
 
     // 看门狗只管本次会话：窗口里停止后再开始，旧看门狗看到会话号变了就退出

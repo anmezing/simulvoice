@@ -537,6 +537,12 @@ fn pick_folder() -> Option<String> {
 }
 
 /// VB-Audio 虚拟线缆的播放端（程序把译文播进去，会议软件把 CABLE Output 当麦克风）
+/// 虚拟声卡（VB-CABLE 等）：没人在物理上听，不会被麦克风收进去
+fn is_virtual_output(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["CABLE", "VB-AUDIO", "VOICEMEETER", "VIRTUAL"].iter().any(|k| n.contains(k))
+}
+
 fn cable_device(outputs: &[String]) -> Option<String> {
     outputs
         .iter()
@@ -607,6 +613,7 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                 // SIMULVOICE_UI_ADVANCED=1：截图检查时默认展开
                 show_advanced: std::env::var("SIMULVOICE_UI_ADVANCED").is_ok(),
                 hwnd_registered: false,
+                hear_check: None,
                 update: Arc::new(Mutex::new(UpdateState::Idle)),
                 update_scheduled: false,
             };
@@ -675,6 +682,8 @@ struct SettingsApp {
     show_advanced: bool,
     /// 主窗口句柄已登记给托盘
     hwnd_registered: bool,
+    /// 「只听译文」设备检查的缓存（查一次要遍历所有音频设备）
+    hear_check: Option<(std::time::Instant, u8, Option<Result<String, String>>)>,
     update: Arc<Mutex<UpdateState>>,
     /// 本次启动的自动检查已经安排过
     update_scheduled: bool,
@@ -1038,20 +1047,122 @@ impl SettingsApp {
             ui.add_space(6.0);
             ui.label(bold("你听到的", 13.0).color(TEXT));
             ui.add_enabled_ui(!locked, |ui| {
-                let sel = if self.cfg.audio.mute_inbound { 1 } else { 0 };
-                if let Some(i) = segmented(ui, "hear", sel, &["原声 + 译文", "只听原声"]) {
-                    self.cfg.audio.mute_inbound = i == 1;
+                let sel = if self.cfg.audio.mute_inbound {
+                    2
+                } else if self.cfg.audio.translation_only {
+                    1
+                } else {
+                    0
+                };
+                if let Some(i) = segmented(ui, "hear", sel, &["原声 + 译文", "只听译文", "只听原声"]) {
+                    self.cfg.audio.translation_only = i == 1;
+                    self.cfg.audio.mute_inbound = i == 2;
+                    self.hear_check = None;
                 }
             });
             let hear = if self.cfg.audio.mute_inbound {
                 "不念译文，会议声音照常，译文只在下方字幕里显示".to_string()
+            } else if self.cfg.audio.translation_only {
+                "翻译时把会议软件用的播放设备静音，你只听到译文；停止后恢复。\
+                 需要会议声音和译文走不同设备，例如会议软件的扬声器选电脑扬声器，译文播放到耳机"
+                    .to_string()
             } else if self.cfg.dsp.duck {
                 "会议声音照常播放；念译文时会议声音自动调小，念完恢复".to_string()
             } else {
                 "会议声音和译文同时播放（「高级设置」里可开启念译文时调小会议声音）".to_string()
             };
             ui.label(RichText::new(hear).size(12.0).color(MUTED));
+            match self.device_check(locked) {
+                Some(Ok(msg)) => ok_line(ui, &msg),
+                Some(Err(msg)) => hint_box(ui, &msg, |_| {}),
+                None => {}
+            }
         });
+    }
+
+    /// 播放设备检查（只听译文能否生效 / 双向翻译外放回声）。要遍历所有音频设备，3 秒查一次
+    fn device_check(&mut self, locked: bool) -> Option<Result<String, String>> {
+        let only = self.cfg.audio.translation_only && !self.cfg.audio.mute_inbound;
+        // 只听译文：开始前提示怎么配；双向：翻译中途换了设备也要提醒，所以运行时也查
+        let key = if only && !locked {
+            1
+        } else if self.cfg.audio.duplex && !only {
+            2
+        } else {
+            return None;
+        };
+        if let Some((at, k, r)) = &self.hear_check {
+            if *k == key && at.elapsed() < Duration::from_secs(3) {
+                return r.clone();
+            }
+        }
+        let r = if key == 1 { Some(self.translation_only_status()) } else { self.duplex_echo_status() };
+        self.hear_check = Some((std::time::Instant::now(), key, r.clone()));
+        r
+    }
+
+    /// 双向翻译时，会议声音若在另一台（外放）设备上出声，回声消除拿不到它做参考（参考只取译文播放设备），
+    /// 麦克风收进去的对方原声会被当成你的话翻给对方
+    #[cfg(windows)]
+    fn duplex_echo_status(&self) -> Option<Result<String, String>> {
+        if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
+            return None;
+        }
+        let pid = crate::capture::find_pid(&self.cfg.audio.process)?;
+        let tts = crate::device_mute::find_output(&self.cfg.audio.output_device)?;
+        let other: Vec<String> = crate::device_mute::devices_of(&crate::capture::process_tree(pid))
+            .into_iter()
+            .filter(|d| d.id != tts.id && !is_virtual_output(&d.name))
+            .map(|d| d.name)
+            .collect();
+        if other.is_empty() {
+            return None;
+        }
+        let meeting = other.join("、");
+        let fix = if self.cfg.audio.mute_inbound {
+            format!("建议把会议软件的扬声器也选成「{}」", tts.name)
+        } else {
+            format!("建议选「只听译文」，或把会议软件的扬声器也选成「{}」", tts.name)
+        };
+        Some(Err(format!(
+            "可能有回声：会议声音在「{meeting}」，译文在「{}」。「{meeting}」如果是外放，\
+             对方原声会被麦克风收进去且消不掉，可能被当成你的话翻给对方。{fix}",
+            tts.name
+        )))
+    }
+
+    #[cfg(not(windows))]
+    fn duplex_echo_status(&self) -> Option<Result<String, String>> {
+        None
+    }
+
+    #[cfg(windows)]
+    fn translation_only_status(&self) -> Result<String, String> {
+        if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
+            return Err("只听译文需要在下面「收听来源」里选会议软件；收整个电脑的声音时，原声没法单独关掉".into());
+        }
+        let Some(pid) = crate::capture::find_pid(&self.cfg.audio.process) else {
+            return Ok("打开会议软件后会检查它用的是哪个播放设备".into());
+        };
+        let tts = crate::device_mute::find_output(&self.cfg.audio.output_device);
+        let tts_name = tts.as_ref().map(|d| d.name.clone()).unwrap_or_else(|| "系统默认".into());
+        let meeting = crate::device_mute::devices_of(&crate::capture::process_tree(pid));
+        if meeting.is_empty() {
+            return Ok(format!("会议软件还没出声；入会后会自动静音它用的设备，译文播放到「{tts_name}」"));
+        }
+        let names: Vec<String> = meeting.iter().map(|d| d.name.clone()).collect();
+        if tts.map(|t| meeting.iter().any(|d| d.id == t.id)).unwrap_or(false) {
+            return Err(format!(
+                "会议软件和译文都在「{tts_name}」上播放，这样没法只听译文。\
+                 请在会议软件的扬声器里改选另一台设备（如电脑扬声器），或在「高级设置 → 声音设备 → 译文播放到」选耳机"
+            ));
+        }
+        Ok(format!("会议声音在「{}」，翻译时会静音；译文播放到「{tts_name}」", names.join("、")))
+    }
+
+    #[cfg(not(windows))]
+    fn translation_only_status(&self) -> Result<String, String> {
+        Err("只听译文目前只支持 Windows".into())
     }
 
     fn source_card(&mut self, ui: &mut egui::Ui, locked: bool) {

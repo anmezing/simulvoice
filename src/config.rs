@@ -145,7 +145,7 @@ pub struct AudioConfig {
     pub backlog_jump_secs: u32,
     /// 对方那一路听到"我的语言"（如中英会议里中文同事插话）时只显示原文，不翻译、不朗读
     pub skip_own_language: bool,
-    /// 只听译文：翻译期间把会议软件所用的播放设备静音（需与译文播放设备不同）
+    /// 只听译文：翻译期间把会议软件的音量关到听不见（采集端放大还原，识别不受影响）
     pub translation_only: bool,
 }
 
@@ -585,7 +585,7 @@ mute_inbound = false           # 静音入向译文
 mute_outbound = false          # 静音出向译文
 backlog_jump_secs = 0          # 积压超过 N 秒跳至最新（0=不跳，字幕保留）
 skip_own_language = true       # 对方那路有人说我的语言时只显示原文（两门语言文字不同才生效）
-translation_only = false       # 只听译文：翻译时静音会议软件的播放设备（需和译文播放设备不同）
+translation_only = false       # 只听译文：翻译时把会议软件的声音关到听不见（需按进程收音）
 vad_rms = 250
 silence_ms = 450
 max_utterance_ms = 8000

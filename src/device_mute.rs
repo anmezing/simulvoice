@@ -1,23 +1,9 @@
-//! 「只听译文」：翻译期间把会议软件所用的播放设备整体静音，你只听到耳机里的译文。
+//! 声音设备查询：会议软件在哪台设备上出声、用哪个麦克风，哪些是虚拟设备。
 //!
-//! 为什么是整台设备而不是会议软件本身：Windows 的按进程收音拿到的是应用音量/静音之后的声音
-//! （把会议软件静音后收到的全是 0），但在"设备静音"之前（实测设备静音时照样收到原音量）。
-//! 所以会议声音和译文必须走两个不同的播放设备：会议软件 → 设备 A（被静音），译文 → 耳机。
-//!
-//! 失败模式：
-//! - 会议软件和译文在同一台设备上：不能静音（会把译文也静音），通过 on_conflict 提示用户怎么改
-//! - 绝不静音"给对方的虚拟麦克风"（CABLE Input）和监听设备，否则对方听不到你的译音
-//! - 会议软件中途换了设备：每 2 秒重新看一遍，新设备也静音
-//! - 用户本来就静音的设备：不接管，结束时也不替他取消
-//! - 虚拟声卡（VB-CABLE 等）：没人在物理上听，不用静音。只听不说时，会议软件的扬声器直接选虚拟声卡
-//!   也能做到只听译文（笔记本只有一个播放设备时的办法）
-//! - 程序崩溃：Windows 会一直保持设备静音。静音前把设备 ID 写进数据目录的 muted-devices.txt，
-//!   正常结束时删掉；下次启动若还在，就取消这些设备的静音（recover）
+//! 0.45.0 的「只听译文」曾经把会议软件那台播放设备整体静音（muted-devices.txt 记录）。
+//! 现在改成只把会议软件自己的音量关到听不见（见 ducking::Hush），这里只保留恢复旧记录的 recover。
 
 use std::collections::HashSet;
-use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 use windows::core::{Interface, PWSTR};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
@@ -26,8 +12,6 @@ use windows::Win32::Media::Audio::{
     IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
-
-const RESCAN: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputDevice {
@@ -126,6 +110,40 @@ pub fn physical_input_name() -> Option<String> {
     }
 }
 
+/// 排查用：这组进程在每台设备上的会话（设备名、进程、状态）
+pub fn session_report(tree: &HashSet<u32>) -> Vec<String> {
+    let mut lines = Vec::new();
+    unsafe {
+        let Some(en) = enumerator() else { return lines };
+        for (flow, kind) in [(eRender, "播放"), (eCapture, "录音")] {
+            let Ok(devices) = en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) else { continue };
+            for i in 0..devices.GetCount().unwrap_or(0) {
+                let Ok(device) = devices.Item(i) else { continue };
+                let name = describe(&device).map(|d| d.name).unwrap_or_default();
+                let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+                let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+                for s in 0..sessions.GetCount().unwrap_or(0) {
+                    let Ok(ctrl) = sessions.GetSession(s) else { continue };
+                    let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else { continue };
+                    let pid = ctrl2.GetProcessId().unwrap_or(0);
+                    if tree.contains(&pid) {
+                        let state = ctrl.GetState().map(|st| st.0).unwrap_or(-1);
+                        let volume = ctrl
+                            .cast::<windows::Win32::Media::Audio::ISimpleAudioVolume>()
+                            .and_then(|v| v.GetMasterVolume())
+                            .map(|v| format!("{v:.4}"))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "{kind}  {name}  进程 {pid}  状态 {state}（0 不活动 1 活动 2 已过期）  音量 {volume}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    lines
+}
+
 fn sessions_on(tree: &HashSet<u32>, flow: EDataFlow) -> Vec<OutputDevice> {
     unsafe {
         let Some(en) = enumerator() else { return Vec::new() };
@@ -165,84 +183,6 @@ unsafe fn endpoint_volume(en: &IMMDeviceEnumerator, id: &str) -> Option<IAudioEn
     let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
     let device = en.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
     device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
-}
-
-/// 翻译期间持有；丢弃时取消静音
-pub struct DeviceMute {
-    stop: Option<Sender<()>>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl DeviceMute {
-    /// root_pid：会议软件；keep：绝不能静音的设备（译文播放、给对方的虚拟麦、监听）。
-    /// on_conflict(设备名)：会议软件和译文在同一台设备上时调用（每台设备只提示一次）
-    pub fn start(root_pid: u32, keep: Vec<OutputDevice>, on_conflict: Box<dyn Fn(&str) + Send>) -> Self {
-        let (tx, rx) = channel::<()>();
-        let handle = std::thread::spawn(move || unsafe {
-            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let keep_ids: HashSet<String> = keep.iter().map(|d| d.id.clone()).collect();
-            let mut muted: Vec<String> = Vec::new();
-            let mut warned: HashSet<String> = HashSet::new();
-            if let Some(en) = enumerator() {
-                loop {
-                    let tree = crate::capture::process_tree(root_pid);
-                    for dev in devices_of(&tree) {
-                        if muted.contains(&dev.id) || is_virtual(&dev.name) {
-                            continue;
-                        }
-                        if keep_ids.contains(&dev.id) {
-                            if warned.insert(dev.id.clone()) {
-                                on_conflict(&dev.name);
-                            }
-                            continue;
-                        }
-                        let Some(vol) = endpoint_volume(&en, &dev.id) else { continue };
-                        // 用户本来就静音的设备不接管
-                        if vol.GetMute().map(|b| b.as_bool()).unwrap_or(true) {
-                            continue;
-                        }
-                        muted.push(dev.id.clone());
-                        // 先记下再静音：静音后崩溃也能在下次启动恢复
-                        if let Err(e) = std::fs::write(marker_path(), muted.join("\n")) {
-                            eprintln!("[只听译文] 写恢复记录失败: {e}");
-                        }
-                        match vol.SetMute(true, std::ptr::null()) {
-                            Ok(()) => eprintln!("[只听译文] 已静音会议软件的播放设备：{}", dev.name),
-                            Err(e) => {
-                                eprintln!("[只听译文] 静音 {} 失败: {e}", dev.name);
-                                muted.pop();
-                            }
-                        }
-                    }
-                    match rx.recv_timeout(RESCAN) {
-                        Err(RecvTimeoutError::Timeout) => continue,
-                        _ => break,
-                    }
-                }
-                for id in &muted {
-                    if let Some(vol) = endpoint_volume(&en, id) {
-                        let _ = vol.SetMute(false, std::ptr::null());
-                    }
-                }
-            }
-            if !muted.is_empty() {
-                eprintln!("[只听译文] 已恢复 {} 台设备的声音", muted.len());
-            }
-            let _ = std::fs::remove_file(marker_path());
-            CoUninitialize();
-        });
-        Self { stop: Some(tx), handle: Some(handle) }
-    }
-}
-
-impl Drop for DeviceMute {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
 }
 
 /// 启动时、窗口关闭后、关机/覆盖安装前调用：没来得及取消的设备静音，在这里取消

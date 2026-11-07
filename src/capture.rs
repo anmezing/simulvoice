@@ -202,6 +202,28 @@ fn run_capture(
             continue;
         }
 
+        // 会议软件被调低（念译文时压低 / 只听译文时几乎静音）时按同样比例放大回来。
+        // 浮点格式在转 16 位之前放大：音量压到千分之一时先转 16 位只剩几个有效位，放大回来全是噪声
+        #[cfg(windows)]
+        let (hush_gain, duck_gain) =
+            if duck_tree.is_empty() { (1.0, 1.0) } else { crate::ducking::capture_gain(&duck_tree) };
+        #[cfg(not(windows))]
+        let (hush_gain, duck_gain) = (1.0f32, 1.0f32);
+        let mut gain = hush_gain * duck_gain;
+        // 只听译文时，会议软件新开的一路声音在被压低之前（最多 1 秒）还是原音量，再放大 1000 倍就削顶成噪声。
+        // 这一块里有明显超过"压低后"应有的音量，就说明还没压下去：只按念译文压低那部分放大
+        if hush_gain > 1.0 && matches!(kind, Fmt::F32) {
+            let peak = dq
+                .iter()
+                .take(frames * frame_bytes)
+                .collect::<Vec<_>>()
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([*b[0], *b[1], *b[2], *b[3]]).abs())
+                .fold(0.0f32, f32::max);
+            if peak * gain > 1.0 {
+                gain = duck_gain;
+            }
+        }
         let mut inter: Vec<i16> = Vec::with_capacity(frames * ch);
         for _ in 0..frames {
             for _ in 0..ch {
@@ -211,7 +233,7 @@ fn run_capture(
                 let b3 = dq.pop_front().unwrap_or(0);
                 let v: i16 = match kind {
                     Fmt::F32 => {
-                        let f = f32::from_le_bytes([b0, b1, b2, b3]);
+                        let f = f32::from_le_bytes([b0, b1, b2, b3]) * gain;
                         (f.clamp(-1.0, 1.0) * 32767.0) as i16
                     }
                     Fmt::I16 => {
@@ -238,13 +260,9 @@ fn run_capture(
         }
 
         let mut mono = downmix(&inter, ch);
-        #[cfg(windows)]
-        if !duck_tree.is_empty() {
-            let gain = crate::ducking::capture_gain(&duck_tree);
-            if gain != 1.0 {
-                for s in mono.iter_mut() {
-                    *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
-                }
+        if gain != 1.0 && !matches!(kind, Fmt::F32) {
+            for s in mono.iter_mut() {
+                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
             }
         }
         if let Some(r) = to48.as_mut() {

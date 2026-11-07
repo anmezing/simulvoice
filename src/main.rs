@@ -830,6 +830,15 @@ fn run_cli() -> Result<()> {
             for (i, name) in sink::list_input_devices()?.iter().enumerate() {
                 println!("  in  {i}: {name}");
             }
+            // --app 进程名：这个软件在哪些设备上有声音会话（排查"只听译文"/麦克风检查）
+            #[cfg(windows)]
+            if let Some(app) = flag(&args, "--app") {
+                let pid = capture::find_pid(&app).ok_or_else(|| anyhow!("没找到带窗口的进程 {app}"))?;
+                println!("{app} 的声音会话:");
+                for line in device_mute::session_report(&capture::process_tree(pid)) {
+                    println!("  {line}");
+                }
+            }
             Ok(())
         }
         Some("models") => match args.get(1).map(String::as_str) {
@@ -1060,44 +1069,24 @@ fn say(args: &[String]) -> Result<()> {
 
 /// 诊断：只打开采集，每秒打印一次音量，不识别不翻译，也不占单实例锁。
 /// `capturetest [--process 名字.exe | --pid N | --mic [设备]] [--seconds S]`，缺省收整个电脑的声音
-/// 只听译文。只在按进程收音（选了会议软件）时可行；整机收音时会议声音和译文必在同一处，做不到
+/// 只听译文：翻译期间把会议软件关到听不见（采集端放大还原，识别不受影响）。
+/// 只在按进程收音（选了会议软件）时可行：收整个电脑的声音时会议声音和别的声音混在一起，没法单独放大
 #[cfg(windows)]
-fn start_translation_only(cfg: &Config, subs: Option<ui::Shared>) -> Option<device_mute::DeviceMute> {
+fn start_translation_only(cfg: &Config, subs: Option<ui::Shared>) -> Option<ducking::Hush> {
     if !cfg.audio.translation_only || cfg.audio.mute_inbound || live_mode_of(cfg) {
         return None;
     }
-    let notify = move |msg: String| {
+    if cfg.audio.input != "pid" || cfg.audio.pid == 0 {
+        let msg = "只听译文需要在「收听来源」里选会议软件；现在收的是整个电脑的声音，原声没法单独关掉";
         eprintln!("[只听译文] {msg}");
         if let Some(s) = &subs {
             if let Ok(mut g) = s.lock() {
-                g.set_notice(msg);
+                g.set_notice(msg.into());
             }
         }
-    };
-    if cfg.audio.input != "pid" || cfg.audio.pid == 0 {
-        notify("只听译文需要在「收听来源」里选会议软件；现在收的是整个电脑的声音，原声没法单独关掉".into());
         return None;
     }
-    // 绝不能静音的设备：译文播放；双向时还有给对方的虚拟麦克风、监听
-    let mut keep: Vec<device_mute::OutputDevice> =
-        device_mute::find_output(&cfg.audio.output_device).into_iter().collect();
-    if cfg.audio.duplex {
-        for name in [&cfg.audio.remote_output_device, &cfg.audio.monitor_device] {
-            if !name.trim().is_empty() {
-                keep.extend(device_mute::find_output(name));
-            }
-        }
-    }
-    Some(device_mute::DeviceMute::start(
-        cfg.audio.pid,
-        keep,
-        Box::new(move |dev: &str| {
-            notify(format!(
-                "只听译文没生效：会议软件和译文都在「{dev}」上播放。请把会议软件的扬声器换到别的设备\
-                 （只听不说时可选虚拟设备 CABLE，麦克风别选 CABLE Output），或把译文播放到耳机"
-            ))
-        }),
-    ))
+    Some(ducking::Hush::start(cfg.audio.pid))
 }
 
 #[cfg(windows)]
@@ -1127,8 +1116,29 @@ fn capture_test(args: &[String]) -> Result<()> {
         println!("[采集] 整个电脑的声音");
         capture::Source::Loopback(None)
     };
+    // --hush-after N：N 秒后开始"只听译文"（把这个软件关到听不见，采集端放大还原），5 秒后恢复
+    let hush_after = flag(args, "--hush-after").and_then(|s| s.parse::<u64>().ok());
+    let hush_pid = match &source {
+        capture::Source::Loopback(Some(p)) => Some(*p),
+        _ => None,
+    };
+    let mut hush: Option<ducking::Hush> = None;
+    let mut hush_state = 0u8;
     let cap = capture::open(source, false, false)?;
     println!("[采集] 已打开，{} Hz；以下每秒一行：样本数 / 音量(RMS)", cap.sample_rate);
+    // --save 文件.wav：把收到的声音存下来（检查音质 / 拿去 transcribe）
+    let mut wav = match flag(args, "--save") {
+        Some(path) => Some(hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: cap.sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )?),
+        None => None,
+    };
     let started = std::time::Instant::now();
     let mut duck_state = 0u8; // 0 未开始 1 调低中 2 已恢复
     let end = std::time::Instant::now() + Duration::from_secs(secs);
@@ -1139,6 +1149,11 @@ fn capture_test(args: &[String]) -> Result<()> {
             Ok(chunk) => {
                 n += chunk.len();
                 sum += chunk.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+                if let Some(w) = wav.as_mut() {
+                    for &s in chunk.iter() {
+                        w.write_sample(s)?;
+                    }
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => return Err(anyhow!("采集线程已退出")),
@@ -1155,6 +1170,19 @@ fn capture_test(args: &[String]) -> Result<()> {
                 duck_state = 2;
             }
         }
+        #[cfg(windows)]
+        if let (Some(after), Some(pid)) = (hush_after, hush_pid) {
+            let t = started.elapsed();
+            if hush_state == 0 && t >= Duration::from_secs(after) {
+                println!("  —— 只听译文：关小会议软件 ——");
+                hush = Some(ducking::Hush::start(pid));
+                hush_state = 1;
+            } else if hush_state == 1 && t >= Duration::from_secs(after + 5) {
+                println!("  —— 恢复 ——");
+                hush = None;
+                hush_state = 2;
+            }
+        }
         if tick.elapsed() >= Duration::from_secs(1) {
             let rms = if n > 0 { (sum / n as f64).sqrt() } else { 0.0 };
             println!("  {n:>7} / {rms:>7.1}{}", if n == 0 { "  （没有声音数据）" } else { "" });
@@ -1162,6 +1190,10 @@ fn capture_test(args: &[String]) -> Result<()> {
             n = 0;
             sum = 0.0;
         }
+    }
+    drop(hush);
+    if let Some(w) = wav {
+        w.finalize()?;
     }
     STOP.store(true, Ordering::SeqCst);
     Ok(())
@@ -2782,9 +2814,9 @@ pub(crate) fn run_session(
         None if cfg.ui.subtitles => Some(ui::new_state()),
         None => None,
     };
-    // 只听译文：会议软件那台播放设备在翻译期间静音（守卫随本函数返回而恢复）
+    // 只听译文：会议软件在翻译期间关到听不见（守卫随本函数返回而恢复）
     #[cfg(windows)]
-    let _device_mute = start_translation_only(&cfg, subs.clone());
+    let _hush = start_translation_only(&cfg, subs.clone());
     let overlay = embedded.is_none();
 
     // 看门狗只管本次会话：窗口里停止后再开始，旧看门狗看到会话号变了就退出

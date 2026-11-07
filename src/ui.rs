@@ -608,6 +608,7 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                 show_advanced: std::env::var("SIMULVOICE_UI_ADVANCED").is_ok(),
                 hwnd_registered: false,
                 hear_check: None,
+                auto_note: None,
                 update: Arc::new(Mutex::new(UpdateState::Idle)),
                 update_scheduled: false,
             };
@@ -621,7 +622,7 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
         crate::tray::shutdown();
         // 翻译中直接关窗口时，后台线程来不及跑完自己的清理进程就退出了：
         // 被静音的会议设备、被调小的会议音量在这里恢复（不然要等下次启动才恢复）
-        crate::ducking::recover();
+        crate::ducking::restore_for_exit();
         crate::device_mute::recover();
     }
     result
@@ -683,7 +684,9 @@ struct SettingsApp {
     /// 主窗口句柄已登记给托盘
     hwnd_registered: bool,
     /// 「只听译文」设备检查的缓存（查一次要遍历所有音频设备）
-    hear_check: Option<(std::time::Instant, u8, Option<Result<String, String>>)>,
+    hear_check: Option<(std::time::Instant, Vec<Result<String, String>>)>,
+    /// 程序自动帮你改过的设置（如译文播放设备从虚拟设备改成真实设备），显示给用户看
+    auto_note: Option<String>,
     update: Arc<Mutex<UpdateState>>,
     /// 本次启动的自动检查已经安排过
     update_scheduled: bool,
@@ -823,6 +826,7 @@ impl SettingsApp {
             }
             return;
         }
+        self.fix_tts_device();
         let mut run_cfg = self.cfg.clone();
         run_cfg.ui.subtitles = false;
         let mut info = String::new();
@@ -1029,7 +1033,7 @@ impl SettingsApp {
             ui.label(RichText::new(desc).size(12.0).color(MUTED));
             if self.cfg.audio.duplex {
                 match cable_device(&self.outputs) {
-                    Some(_) => ok_line(ui, "已检测到虚拟麦克风：在会议软件里把麦克风选成 CABLE Output"),
+                    Some(_) => {}
                     None => hint_box(
                         ui,
                         "让对方听到你的译音，需要先装免费的虚拟麦克风 VB-CABLE（装好后重启本程序）。\
@@ -1063,63 +1067,146 @@ impl SettingsApp {
             let hear = if self.cfg.audio.mute_inbound {
                 "不念译文，会议声音照常，译文只在下方字幕里显示".to_string()
             } else if self.cfg.audio.translation_only {
-                "翻译时把会议软件用的播放设备静音，你只听到译文；停止后恢复。\
-                 需要会议声音和译文走不同设备，例如会议软件的扬声器选电脑扬声器，译文播放到耳机"
-                    .to_string()
+                "翻译时把会议软件的声音关到听不见，你只听到译文；停止后恢复".to_string()
             } else if self.cfg.dsp.duck {
                 "会议声音照常播放；念译文时会议声音自动调小，念完恢复".to_string()
             } else {
                 "会议声音和译文同时播放（「高级设置」里可开启念译文时调小会议声音）".to_string()
             };
             ui.label(RichText::new(hear).size(12.0).color(MUTED));
-            match self.device_check(locked) {
-                Some(Ok(msg)) => ok_line(ui, &msg),
-                Some(Err(msg)) => hint_box(ui, &msg, |_| {}),
-                None => {}
+            if let Some(note) = &self.auto_note {
+                ok_line(ui, note);
+            }
+            for r in self.device_check() {
+                match r {
+                    Ok(msg) => ok_line(ui, &msg),
+                    Err(msg) => hint_box(ui, &msg, |_| {}),
+                }
             }
         });
     }
 
-    /// 播放设备检查（只听译文能否生效 / 双向翻译外放回声）。要遍历所有音频设备，3 秒查一次
-    fn device_check(&mut self, locked: bool) -> Option<Result<String, String>> {
-        let only = self.cfg.audio.translation_only && !self.cfg.audio.mute_inbound;
-        // 只听译文：开始前提示怎么配；双向：翻译中途换了设备也要提醒，所以运行时也查
-        let key = if only && !locked {
-            1
-        } else if self.cfg.audio.duplex && !only {
-            2
-        } else {
-            return None;
-        };
-        if let Some((at, k, r)) = &self.hear_check {
-            if *k == key && at.elapsed() < Duration::from_secs(3) {
+    /// 声音设备检查。要遍历所有音频设备，3 秒查一次。返回要显示的几条（Ok 绿色 / Err 黄色）
+    fn device_check(&mut self) -> Vec<Result<String, String>> {
+        if let Some((at, r)) = &self.hear_check {
+            if at.elapsed() < Duration::from_secs(3) {
                 return r.clone();
             }
         }
-        let r = if key == 1 { Some(self.translation_only_status()) } else { self.duplex_echo_status() };
-        self.hear_check = Some((std::time::Instant::now(), key, r.clone()));
+        let r = self.audio_status();
+        self.hear_check = Some((std::time::Instant::now(), r.clone()));
         r
+    }
+
+    /// 译文播放设备不能是虚拟设备（比如 CABLE，你听不到）：自动改成真实设备。改了就记一条说明
+    #[cfg(windows)]
+    fn fix_tts_device(&mut self) {
+        use crate::device_mute as dm;
+        let Some(cur) = dm::find_output(&self.cfg.audio.output_device) else { return };
+        if !dm::is_virtual(&cur.name) {
+            return;
+        }
+        let default_ok = dm::find_output("").filter(|d| !dm::is_virtual(&d.name));
+        let to = match default_ok {
+            // 系统默认是真实设备：跟随系统默认
+            Some(d) => {
+                self.cfg.audio.output_device = String::new();
+                d.name
+            }
+            None => match self.outputs.iter().find(|n| !dm::is_virtual(n)) {
+                Some(n) => {
+                    self.cfg.audio.output_device = n.clone();
+                    n.clone()
+                }
+                None => return,
+            },
+        };
+        self.auto_note = Some(format!(
+            "译文已改为播放到「{to}」（之前选的「{}」是虚拟设备，你听不到）",
+            cur.name
+        ));
+    }
+
+    #[cfg(not(windows))]
+    fn fix_tts_device(&mut self) {}
+
+    #[cfg(windows)]
+    fn audio_status(&mut self) -> Vec<Result<String, String>> {
+        use crate::device_mute as dm;
+        self.fix_tts_device();
+        let mut out = Vec::new();
+        let duplex = self.cfg.audio.duplex;
+        let only = self.cfg.audio.translation_only && !self.cfg.audio.mute_inbound;
+        let by_app = self.cfg.audio.input == "pid" && !self.cfg.audio.process.trim().is_empty();
+        let app = meeting_label(&self.cfg.audio.process).map(str::to_string).unwrap_or_else(|| "会议软件".into());
+        let cable = cable_device(&self.outputs);
+        let hush_ok = format!("翻译时会把{app}的声音关到听不见，你只听到译文；停止后恢复");
+        if only && !by_app {
+            out.push(Err("只听译文需要在下面「收听来源」里选会议软件；收整个电脑的声音时，原声没法单独关掉".into()));
+        }
+        let pid = if by_app { crate::capture::find_pid(&self.cfg.audio.process) } else { None };
+        let Some(pid) = pid else {
+            if duplex && cable.is_some() {
+                out.push(Ok("在会议软件里把麦克风选成「CABLE Output」，对方就能听到你的译音".into()));
+            }
+            if only && by_app {
+                out.push(Ok(hush_ok));
+            }
+            return out;
+        };
+        let tree = crate::capture::process_tree(pid);
+        let speakers = dm::devices_of(&tree);
+        let mics = dm::inputs_of(&tree);
+        if let Some(e) = self.cable_loop(&app, &speakers, &mics) {
+            out.push(Err(e));
+            return out;
+        }
+        if let (true, Some(cable)) = (duplex, &cable) {
+            if mics.iter().any(|m| dm::same_cable(&m.name, cable)) {
+                out.push(Ok(format!("{app}的麦克风已是「CABLE Output」，对方能听到你的译音")));
+            } else if let Some(m) = mics.iter().find(|m| !dm::is_virtual(&m.name)) {
+                out.push(Err(format!(
+                    "对方还听不到你的译音：{app}的麦克风现在是「{}」，请在{app}的音频设置里把麦克风改成「CABLE Output」",
+                    m.name
+                )));
+            } else {
+                out.push(Ok(format!("在{app}里把麦克风选成「CABLE Output」，对方就能听到你的译音")));
+            }
+        }
+        if only {
+            out.push(Ok(hush_ok));
+        } else if duplex {
+            if let Some(e) = self.echo_warning(&app, &speakers) {
+                out.push(Err(e));
+            }
+        }
+        out
+    }
+
+    #[cfg(not(windows))]
+    fn audio_status(&mut self) -> Vec<Result<String, String>> {
+        Vec::new()
     }
 
     /// 会议软件的扬声器和麦克风是同一根虚拟线（扬声器 CABLE In、麦克风 CABLE Output）：会议声音会原样送回会议，
     /// 对方听到自己的回声。双向翻译时会议扬声器选了给对方送译音的那根线也一样
     #[cfg(windows)]
-    fn cable_loop(&self, tree: &std::collections::HashSet<u32>, speakers: &[crate::device_mute::OutputDevice]) -> Option<String> {
+    fn cable_loop(
+        &self,
+        app: &str,
+        speakers: &[crate::device_mute::OutputDevice],
+        mics: &[crate::device_mute::OutputDevice],
+    ) -> Option<String> {
         use crate::device_mute as dm;
         let virt: Vec<&str> = speakers.iter().map(|d| d.name.as_str()).filter(|n| dm::is_virtual(n)).collect();
         if virt.is_empty() {
             return None;
         }
-        let fix = if self.cfg.audio.duplex {
-            "双向翻译时，会议软件的扬声器请选电脑扬声器或耳机".to_string()
-        } else {
-            let mic = dm::physical_input_name().unwrap_or_else(|| "你的真实麦克风".into());
-            format!("只听不说时，会议软件的麦克风请改成「{mic}」")
-        };
-        for mic in dm::inputs_of(tree) {
+        let fix = format!("请把{app}的扬声器改回电脑扬声器或耳机（只听译文不需要改扬声器）");
+        for mic in mics {
             if let Some(spk) = virt.iter().find(|s| dm::same_cable(s, &mic.name)) {
                 return Some(format!(
-                    "会议软件的扬声器「{spk}」和麦克风「{}」是同一根虚拟线，对方会听到会议声音被送回去。{fix}",
+                    "{app}的扬声器「{spk}」和麦克风「{}」是同一根虚拟线，对方会听到会议声音被送回去。{fix}",
                     mic.name
                 ));
             }
@@ -1127,7 +1214,9 @@ impl SettingsApp {
         if self.cfg.audio.duplex {
             let ours = cable_device(&self.outputs)?;
             let spk = virt.iter().find(|s| dm::same_cable(s, &ours))?;
-            return Some(format!("会议软件的扬声器选了「{spk}」，它连着给对方送译音的虚拟麦克风，对方会听到会议声音被送回去。{fix}"));
+            return Some(format!(
+                "{app}的扬声器选了「{spk}」，它连着给对方送译音的虚拟麦克风，对方会听到会议声音被送回去。{fix}"
+            ));
         }
         None
     }
@@ -1135,98 +1224,28 @@ impl SettingsApp {
     /// 双向翻译时，会议声音若在另一台（外放）设备上出声，回声消除拿不到它做参考（参考只取译文播放设备），
     /// 麦克风收进去的对方原声会被当成你的话翻给对方
     #[cfg(windows)]
-    fn duplex_echo_status(&self) -> Option<Result<String, String>> {
+    fn echo_warning(&self, app: &str, speakers: &[crate::device_mute::OutputDevice]) -> Option<String> {
         use crate::device_mute as dm;
-        if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
-            return None;
-        }
-        let pid = crate::capture::find_pid(&self.cfg.audio.process)?;
-        let tree = crate::capture::process_tree(pid);
-        let meeting = dm::devices_of(&tree);
-        if let Some(e) = self.cable_loop(&tree, &meeting) {
-            return Some(Err(e));
-        }
         let tts = dm::find_output(&self.cfg.audio.output_device)?;
-        let other: Vec<String> = meeting
-            .into_iter()
+        let other: Vec<&str> = speakers
+            .iter()
             .filter(|d| d.id != tts.id && !dm::is_virtual(&d.name))
-            .map(|d| d.name)
+            .map(|d| d.name.as_str())
             .collect();
         if other.is_empty() {
             return None;
         }
         let meeting = other.join("、");
         let fix = if self.cfg.audio.mute_inbound {
-            format!("建议把会议软件的扬声器也选成「{}」", tts.name)
+            format!("把{app}的扬声器也选成「{}」就好", tts.name)
         } else {
-            format!("建议选「只听译文」，或把会议软件的扬声器也选成「{}」", tts.name)
+            "「你听到的」选「只听译文」就能避免".to_string()
         };
-        Some(Err(format!(
-            "可能有回声：会议声音在「{meeting}」，译文在「{}」。「{meeting}」如果是外放，\
-             对方原声会被麦克风收进去且消不掉，可能被当成你的话翻给对方。{fix}",
+        Some(format!(
+            "可能有回声：{app}的声音在「{meeting}」，译文在「{}」。「{meeting}」如果是外放，\
+             对方原声会被麦克风收进去，可能被当成你的话翻给对方。{fix}",
             tts.name
-        )))
-    }
-
-    #[cfg(not(windows))]
-    fn duplex_echo_status(&self) -> Option<Result<String, String>> {
-        None
-    }
-
-    #[cfg(windows)]
-    fn translation_only_status(&self) -> Result<String, String> {
-        use crate::device_mute as dm;
-        if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
-            return Err("只听译文需要在下面「收听来源」里选会议软件；收整个电脑的声音时，原声没法单独关掉".into());
-        }
-        let Some(pid) = crate::capture::find_pid(&self.cfg.audio.process) else {
-            return Ok("打开会议软件后会检查它用的是哪个播放设备".into());
-        };
-        let tree = crate::capture::process_tree(pid);
-        let tts = dm::find_output(&self.cfg.audio.output_device);
-        let tts_name = tts.as_ref().map(|d| d.name.clone()).unwrap_or_else(|| "系统默认".into());
-        let meeting = dm::devices_of(&tree);
-        if meeting.is_empty() {
-            return Ok(format!("会议软件还没出声；入会后会自动静音它用的设备，译文播放到「{tts_name}」"));
-        }
-        if let Some(e) = self.cable_loop(&tree, &meeting) {
-            return Err(e);
-        }
-        let (virt, phys): (Vec<_>, Vec<_>) = meeting.into_iter().partition(|d| dm::is_virtual(&d.name));
-        if tts.as_ref().map(|t| phys.iter().any(|d| d.id == t.id)).unwrap_or(false) {
-            let how = if self.cfg.audio.duplex {
-                format!(
-                    "双向翻译时需要第二个播放设备：接上 USB 或蓝牙耳机，在「高级设置 → 声音设备 → 译文播放到」选它，\
-                     会议软件的扬声器保持「{tts_name}」"
-                )
-            } else {
-                let mic = dm::physical_input_name().unwrap_or_else(|| "你的真实麦克风".into());
-                match cable_device(&self.outputs) {
-                    Some(cable) => format!(
-                        "只有一个播放设备时：在会议软件里把扬声器改成「{cable}」（虚拟设备，原声就听不到了），\
-                         麦克风选「{mic}」。有 USB 或蓝牙耳机的话，也可以把译文播放到耳机"
-                    ),
-                    None => "接上 USB 或蓝牙耳机，把译文播放到耳机；或者装免费的虚拟声卡 VB-CABLE，\
-                             把会议软件的扬声器选成它"
-                        .to_string(),
-                }
-            };
-            return Err(format!("会议软件和译文都在「{tts_name}」上播放，没法只听译文。{how}"));
-        }
-        if phys.is_empty() {
-            let names: Vec<String> = virt.into_iter().map(|d| d.name).collect();
-            return Ok(format!(
-                "会议声音送进了虚拟设备「{}」，你听不到原声，只听到「{tts_name}」上的译文",
-                names.join("、")
-            ));
-        }
-        let names: Vec<String> = phys.into_iter().map(|d| d.name).collect();
-        Ok(format!("会议声音在「{}」，翻译时会静音；译文播放到「{tts_name}」", names.join("、")))
-    }
-
-    #[cfg(not(windows))]
-    fn translation_only_status(&self) -> Result<String, String> {
-        Err("只听译文目前只支持 Windows".into())
+        ))
     }
 
     fn source_card(&mut self, ui: &mut egui::Ui, locked: bool) {

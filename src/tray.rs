@@ -304,7 +304,7 @@ unsafe fn request_quit() {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DestroyWindow, PostMessageW, PostQuitMessage};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DestroyWindow, PostQuitMessage};
     let taskbar_created = TASKBAR_CREATED.load(Ordering::SeqCst);
     if taskbar_created != 0 && msg == taskbar_created {
         add_icon(ICON.load(Ordering::SeqCst) as _);
@@ -337,7 +337,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_ENDSESSION => {
             if wparam != 0 {
                 // 返回后进程随时可能被结束：先同步把被静音的设备、被调小的音量恢复，再走正常退出
-                crate::ducking::recover();
+                crate::ducking::restore_for_exit();
                 crate::device_mute::recover();
                 request_quit();
             }

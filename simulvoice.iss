@@ -18,6 +18,8 @@ UninstallDisplayIcon={app}\simulvoice.exe
 SetupIconFile=dist\stage\simulvoice.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Close a running SimulVoice before overwriting it (the app handles WM_ENDSESSION); force-close if it does not exit in time
+CloseApplications=force
 
 [Languages]
 Name: "chs"; MessagesFile: "installer\ChineseSimplified.isl"

@@ -245,7 +245,7 @@ impl Drop for DeviceMute {
     }
 }
 
-/// 启动时调用：上次异常退出没来得及取消的设备静音，在这里取消
+/// 启动时、窗口关闭后、关机/覆盖安装前调用：没来得及取消的设备静音，在这里取消
 pub fn recover() {
     let Ok(text) = std::fs::read_to_string(marker_path()) else {
         return;
@@ -265,7 +265,7 @@ pub fn recover() {
         }
         CoUninitialize();
     }
-    eprintln!("[只听译文] 上次没正常结束，已取消 {restored} 台设备的静音");
+    eprintln!("[只听译文] 有没恢复的记录（上次异常退出或翻译中关闭），已取消 {restored} 台设备的静音");
     let _ = std::fs::remove_file(marker_path());
 }
 

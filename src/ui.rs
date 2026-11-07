@@ -617,7 +617,13 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
     )
     .map_err(|e| anyhow::anyhow!("窗口启动失败: {e}"));
     #[cfg(windows)]
-    crate::tray::shutdown();
+    {
+        crate::tray::shutdown();
+        // 翻译中直接关窗口时，后台线程来不及跑完自己的清理进程就退出了：
+        // 被静音的会议设备、被调小的会议音量在这里恢复（不然要等下次启动才恢复）
+        crate::ducking::recover();
+        crate::device_mute::recover();
+    }
     result
 }
 

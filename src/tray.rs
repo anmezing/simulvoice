@@ -14,6 +14,8 @@ const WM_APP: u32 = 0x8000;
 const WM_COMMAND: u32 = 0x0111;
 const WM_CLOSE: u32 = 0x0010;
 const WM_NULL: u32 = 0x0000;
+const WM_QUERYENDSESSION: u32 = 0x0011;
+const WM_ENDSESSION: u32 = 0x0016;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
 const NIM_ADD: u32 = 0;
@@ -289,6 +291,18 @@ unsafe fn show_menu(hwnd: HWND) {
     DestroyMenu(menu);
 }
 
+/// 退出：走窗口自己的关闭流程（保存设置、停止翻译）。隐藏的窗口 eframe 不跑 update，先叫回来
+unsafe fn request_quit() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+    let main = MAIN_HWND.load(Ordering::SeqCst);
+    if main != 0 {
+        show_main();
+        let _ = PostMessageW(main as HWND, WM_CLOSE, 0, 0);
+    } else {
+        crate::STOP.store(true, Ordering::SeqCst);
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DestroyWindow, PostMessageW, PostQuitMessage};
     let taskbar_created = TASKBAR_CREATED.load(Ordering::SeqCst);
@@ -312,17 +326,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let next = !crate::hotkeys::MUTE_TTS.load(Ordering::SeqCst);
                     crate::hotkeys::MUTE_TTS.store(next, Ordering::SeqCst);
                 }
-                ID_QUIT => {
-                    let main = MAIN_HWND.load(Ordering::SeqCst);
-                    if main != 0 {
-                        // 走窗口自己的关闭流程（保存设置、停止翻译）。隐藏的窗口 eframe 不跑 update，先叫回来
-                        show_main();
-                        let _ = PostMessageW(main as HWND, WM_CLOSE, 0, 0);
-                    } else {
-                        crate::STOP.store(true, Ordering::SeqCst);
-                    }
-                }
+                ID_QUIT => request_quit(),
                 _ => {}
+            }
+            0
+        }
+        // 安装包覆盖安装（Restart Manager）、注销、关机时会问"能不能关"。以前没处理，
+        // 安装程序就报"无法自动关闭所有应用程序"
+        WM_QUERYENDSESSION => 1,
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                // 返回后进程随时可能被结束：先同步把被静音的设备、被调小的音量恢复，再走正常退出
+                crate::ducking::recover();
+                crate::device_mute::recover();
+                request_quit();
             }
             0
         }

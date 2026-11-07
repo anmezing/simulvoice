@@ -122,7 +122,7 @@ pub fn restore() {
     }
 }
 
-/// 启动时调用：上次异常退出、没来得及恢复的音量，按记录调回去
+/// 启动时、窗口关闭后、关机/覆盖安装前调用：没来得及恢复的音量，按记录调回去
 pub fn recover() {
     let Ok(text) = std::fs::read_to_string(marker_path()) else {
         return;
@@ -151,7 +151,7 @@ pub fn recover() {
             CoUninitialize();
         }
     }
-    eprintln!("[压低] 上次没正常结束，已恢复 {restored} 个应用的音量");
+    eprintln!("[压低] 有没恢复的记录（上次异常退出或翻译中关闭），已恢复 {restored} 个应用的音量");
     let _ = std::fs::remove_file(marker_path());
 }
 

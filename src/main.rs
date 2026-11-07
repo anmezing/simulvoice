@@ -1078,14 +1078,14 @@ fn start_translation_only(cfg: &Config, subs: Option<ui::Shared>) -> Option<devi
         notify("只听译文需要在「收听来源」里选会议软件；现在收的是整个电脑的声音，原声没法单独关掉".into());
         return None;
     }
-    // 绝不能静音的设备：译文播放、给对方的虚拟麦克风、监听
-    let mut keep = Vec::new();
-    for name in [&cfg.audio.output_device, &cfg.audio.remote_output_device, &cfg.audio.monitor_device] {
-        if name.trim().is_empty() && !std::ptr::eq(name, &cfg.audio.output_device) {
-            continue;
-        }
-        if let Some(d) = device_mute::find_output(name) {
-            keep.push(d);
+    // 绝不能静音的设备：译文播放；双向时还有给对方的虚拟麦克风、监听
+    let mut keep: Vec<device_mute::OutputDevice> =
+        device_mute::find_output(&cfg.audio.output_device).into_iter().collect();
+    if cfg.audio.duplex {
+        for name in [&cfg.audio.remote_output_device, &cfg.audio.monitor_device] {
+            if !name.trim().is_empty() {
+                keep.extend(device_mute::find_output(name));
+            }
         }
     }
     Some(device_mute::DeviceMute::start(
@@ -1093,8 +1093,8 @@ fn start_translation_only(cfg: &Config, subs: Option<ui::Shared>) -> Option<devi
         keep,
         Box::new(move |dev: &str| {
             notify(format!(
-                "只听译文没生效：会议软件和译文都在「{dev}」上播放。请把其中一个换到别的设备：\
-                 会议软件的扬声器改选另一台设备，或在「高级设置 → 声音设备 → 译文播放到」选耳机"
+                "只听译文没生效：会议软件和译文都在「{dev}」上播放。请把会议软件的扬声器换到别的设备\
+                 （只听不说时可选虚拟设备 CABLE，麦克风别选 CABLE Output），或把译文播放到耳机"
             ))
         }),
     ))

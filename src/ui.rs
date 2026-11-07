@@ -537,12 +537,6 @@ fn pick_folder() -> Option<String> {
 }
 
 /// VB-Audio 虚拟线缆的播放端（程序把译文播进去，会议软件把 CABLE Output 当麦克风）
-/// 虚拟声卡（VB-CABLE 等）：没人在物理上听，不会被麦克风收进去
-fn is_virtual_output(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
-    ["CABLE", "VB-AUDIO", "VOICEMEETER", "VIRTUAL"].iter().any(|k| n.contains(k))
-}
-
 fn cable_device(outputs: &[String]) -> Option<String> {
     outputs
         .iter()
@@ -1101,18 +1095,55 @@ impl SettingsApp {
         r
     }
 
+    /// 会议软件的扬声器和麦克风是同一根虚拟线（扬声器 CABLE In、麦克风 CABLE Output）：会议声音会原样送回会议，
+    /// 对方听到自己的回声。双向翻译时会议扬声器选了给对方送译音的那根线也一样
+    #[cfg(windows)]
+    fn cable_loop(&self, tree: &std::collections::HashSet<u32>, speakers: &[crate::device_mute::OutputDevice]) -> Option<String> {
+        use crate::device_mute as dm;
+        let virt: Vec<&str> = speakers.iter().map(|d| d.name.as_str()).filter(|n| dm::is_virtual(n)).collect();
+        if virt.is_empty() {
+            return None;
+        }
+        let fix = if self.cfg.audio.duplex {
+            "双向翻译时，会议软件的扬声器请选电脑扬声器或耳机".to_string()
+        } else {
+            let mic = dm::physical_input_name().unwrap_or_else(|| "你的真实麦克风".into());
+            format!("只听不说时，会议软件的麦克风请改成「{mic}」")
+        };
+        for mic in dm::inputs_of(tree) {
+            if let Some(spk) = virt.iter().find(|s| dm::same_cable(s, &mic.name)) {
+                return Some(format!(
+                    "会议软件的扬声器「{spk}」和麦克风「{}」是同一根虚拟线，对方会听到会议声音被送回去。{fix}",
+                    mic.name
+                ));
+            }
+        }
+        if self.cfg.audio.duplex {
+            let ours = cable_device(&self.outputs)?;
+            let spk = virt.iter().find(|s| dm::same_cable(s, &ours))?;
+            return Some(format!("会议软件的扬声器选了「{spk}」，它连着给对方送译音的虚拟麦克风，对方会听到会议声音被送回去。{fix}"));
+        }
+        None
+    }
+
     /// 双向翻译时，会议声音若在另一台（外放）设备上出声，回声消除拿不到它做参考（参考只取译文播放设备），
     /// 麦克风收进去的对方原声会被当成你的话翻给对方
     #[cfg(windows)]
     fn duplex_echo_status(&self) -> Option<Result<String, String>> {
+        use crate::device_mute as dm;
         if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
             return None;
         }
         let pid = crate::capture::find_pid(&self.cfg.audio.process)?;
-        let tts = crate::device_mute::find_output(&self.cfg.audio.output_device)?;
-        let other: Vec<String> = crate::device_mute::devices_of(&crate::capture::process_tree(pid))
+        let tree = crate::capture::process_tree(pid);
+        let meeting = dm::devices_of(&tree);
+        if let Some(e) = self.cable_loop(&tree, &meeting) {
+            return Some(Err(e));
+        }
+        let tts = dm::find_output(&self.cfg.audio.output_device)?;
+        let other: Vec<String> = meeting
             .into_iter()
-            .filter(|d| d.id != tts.id && !is_virtual_output(&d.name))
+            .filter(|d| d.id != tts.id && !dm::is_virtual(&d.name))
             .map(|d| d.name)
             .collect();
         if other.is_empty() {
@@ -1138,25 +1169,52 @@ impl SettingsApp {
 
     #[cfg(windows)]
     fn translation_only_status(&self) -> Result<String, String> {
+        use crate::device_mute as dm;
         if self.cfg.audio.input != "pid" || self.cfg.audio.process.trim().is_empty() {
             return Err("只听译文需要在下面「收听来源」里选会议软件；收整个电脑的声音时，原声没法单独关掉".into());
         }
         let Some(pid) = crate::capture::find_pid(&self.cfg.audio.process) else {
             return Ok("打开会议软件后会检查它用的是哪个播放设备".into());
         };
-        let tts = crate::device_mute::find_output(&self.cfg.audio.output_device);
+        let tree = crate::capture::process_tree(pid);
+        let tts = dm::find_output(&self.cfg.audio.output_device);
         let tts_name = tts.as_ref().map(|d| d.name.clone()).unwrap_or_else(|| "系统默认".into());
-        let meeting = crate::device_mute::devices_of(&crate::capture::process_tree(pid));
+        let meeting = dm::devices_of(&tree);
         if meeting.is_empty() {
             return Ok(format!("会议软件还没出声；入会后会自动静音它用的设备，译文播放到「{tts_name}」"));
         }
-        let names: Vec<String> = meeting.iter().map(|d| d.name.clone()).collect();
-        if tts.map(|t| meeting.iter().any(|d| d.id == t.id)).unwrap_or(false) {
-            return Err(format!(
-                "会议软件和译文都在「{tts_name}」上播放，这样没法只听译文。\
-                 请在会议软件的扬声器里改选另一台设备（如电脑扬声器），或在「高级设置 → 声音设备 → 译文播放到」选耳机"
+        if let Some(e) = self.cable_loop(&tree, &meeting) {
+            return Err(e);
+        }
+        let (virt, phys): (Vec<_>, Vec<_>) = meeting.into_iter().partition(|d| dm::is_virtual(&d.name));
+        if tts.as_ref().map(|t| phys.iter().any(|d| d.id == t.id)).unwrap_or(false) {
+            let how = if self.cfg.audio.duplex {
+                format!(
+                    "双向翻译时需要第二个播放设备：接上 USB 或蓝牙耳机，在「高级设置 → 声音设备 → 译文播放到」选它，\
+                     会议软件的扬声器保持「{tts_name}」"
+                )
+            } else {
+                let mic = dm::physical_input_name().unwrap_or_else(|| "你的真实麦克风".into());
+                match cable_device(&self.outputs) {
+                    Some(cable) => format!(
+                        "只有一个播放设备时：在会议软件里把扬声器改成「{cable}」（虚拟设备，原声就听不到了），\
+                         麦克风选「{mic}」。有 USB 或蓝牙耳机的话，也可以把译文播放到耳机"
+                    ),
+                    None => "接上 USB 或蓝牙耳机，把译文播放到耳机；或者装免费的虚拟声卡 VB-CABLE，\
+                             把会议软件的扬声器选成它"
+                        .to_string(),
+                }
+            };
+            return Err(format!("会议软件和译文都在「{tts_name}」上播放，没法只听译文。{how}"));
+        }
+        if phys.is_empty() {
+            let names: Vec<String> = virt.into_iter().map(|d| d.name).collect();
+            return Ok(format!(
+                "会议声音送进了虚拟设备「{}」，你听不到原声，只听到「{tts_name}」上的译文",
+                names.join("、")
             ));
         }
+        let names: Vec<String> = phys.into_iter().map(|d| d.name).collect();
         Ok(format!("会议声音在「{}」，翻译时会静音；译文播放到「{tts_name}」", names.join("、")))
     }
 

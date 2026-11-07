@@ -9,6 +9,8 @@
 //! - 绝不静音"给对方的虚拟麦克风"（CABLE Input）和监听设备，否则对方听不到你的译音
 //! - 会议软件中途换了设备：每 2 秒重新看一遍，新设备也静音
 //! - 用户本来就静音的设备：不接管，结束时也不替他取消
+//! - 虚拟声卡（VB-CABLE 等）：没人在物理上听，不用静音。只听不说时，会议软件的扬声器直接选虚拟声卡
+//!   也能做到只听译文（笔记本只有一个播放设备时的办法）
 //! - 程序崩溃：Windows 会一直保持设备静音。静音前把设备 ID 写进数据目录的 muted-devices.txt，
 //!   正常结束时删掉；下次启动若还在，就取消这些设备的静音（recover）
 
@@ -20,8 +22,8 @@ use std::time::Duration;
 use windows::core::{Interface, PWSTR};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-    IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    eCapture, eConsole, eRender, AudioSessionStateActive, EDataFlow, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
 
@@ -31,6 +33,22 @@ const RESCAN: Duration = Duration::from_secs(2);
 pub struct OutputDevice {
     pub id: String,
     pub name: String,
+}
+
+/// 虚拟声卡（VB-CABLE、VoiceMeeter 等）：不会从喇叭里放出来
+pub fn is_virtual(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["CABLE", "VB-AUDIO", "VOICEMEETER"].iter().any(|k| n.contains(k))
+}
+
+/// 两个虚拟设备是不是同一根虚拟线（"CABLE In 16ch (VB-Audio Virtual Cable)" 和
+/// "CABLE Output (VB-Audio Virtual Cable)" 是同一根：往前者放的声音会从后者出来）
+pub fn same_cable(a: &str, b: &str) -> bool {
+    fn driver(n: &str) -> Option<&str> {
+        let start = n.rfind('(')?;
+        Some(n[start..].trim())
+    }
+    is_virtual(a) && is_virtual(b) && driver(a).is_some() && driver(a) == driver(b)
 }
 
 fn marker_path() -> std::path::PathBuf {
@@ -87,9 +105,31 @@ pub fn find_output(name: &str) -> Option<OutputDevice> {
 
 /// 这组进程正在用哪些播放设备出声（有活动会话的优先；都不活动时返回有会话的设备）
 pub fn devices_of(tree: &HashSet<u32>) -> Vec<OutputDevice> {
+    sessions_on(tree, eRender)
+}
+
+/// 这组进程正在用哪些麦克风（录音设备）
+pub fn inputs_of(tree: &HashSet<u32>) -> Vec<OutputDevice> {
+    sessions_on(tree, eCapture)
+}
+
+/// 第一个真实（非虚拟）的麦克风名字
+pub fn physical_input_name() -> Option<String> {
+    unsafe {
+        let en = enumerator()?;
+        let devices = en.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE).ok()?;
+        (0..devices.GetCount().unwrap_or(0))
+            .filter_map(|i| devices.Item(i).ok())
+            .filter_map(|d| describe(&d))
+            .map(|d| d.name)
+            .find(|n| !is_virtual(n))
+    }
+}
+
+fn sessions_on(tree: &HashSet<u32>, flow: EDataFlow) -> Vec<OutputDevice> {
     unsafe {
         let Some(en) = enumerator() else { return Vec::new() };
-        let Ok(devices) = en.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else {
+        let Ok(devices) = en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) else {
             return Vec::new();
         };
         let (mut active, mut any) = (Vec::new(), Vec::new());
@@ -148,7 +188,7 @@ impl DeviceMute {
                 loop {
                     let tree = crate::capture::process_tree(root_pid);
                     for dev in devices_of(&tree) {
-                        if muted.contains(&dev.id) {
+                        if muted.contains(&dev.id) || is_virtual(&dev.name) {
                             continue;
                         }
                         if keep_ids.contains(&dev.id) {
@@ -227,4 +267,26 @@ pub fn recover() {
     }
     eprintln!("[只听译文] 上次没正常结束，已取消 {restored} 台设备的静音");
     let _ = std::fs::remove_file(marker_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_devices() {
+        assert!(is_virtual("CABLE In 16ch (VB-Audio Virtual Cable)"));
+        assert!(is_virtual("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"));
+        assert!(!is_virtual("扬声器 (Realtek(R) Audio)"));
+        assert!(!is_virtual("耳机 (HyperX Virtual Surround Sound)"));
+    }
+
+    #[test]
+    fn same_virtual_cable() {
+        let out = "CABLE Output (VB-Audio Virtual Cable)";
+        assert!(same_cable("CABLE In 16ch (VB-Audio Virtual Cable)", out));
+        assert!(same_cable("CABLE Input (VB-Audio Virtual Cable)", out));
+        assert!(!same_cable("CABLE-A Input (VB-Audio Cable A)", out));
+        assert!(!same_cable("扬声器 (Realtek(R) Audio)", "麦克风 (Realtek(R) Audio)"));
+    }
 }

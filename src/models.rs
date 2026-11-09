@@ -29,6 +29,7 @@ pub fn list() {
     println!("  piper <语言> 本地朗读，可选：{}",
         crate::lang::LANGS.iter().filter(|l| !l.piper.is_empty()).map(|l| l.code).collect::<Vec<_>>().join(" "));
     println!("  silero       语音检测（2 MB）");
+    println!("  zipvoice     我的音色：用自己的声音朗读中/英文译文（170 MB）");
     println!("\n旧引擎 (Vosk, 离线 STT):");
     for (lang, url) in VOSK_MODELS {
         println!("  {lang:>3}  {}", url.rsplit('/').next().unwrap_or(url));
@@ -339,6 +340,15 @@ pub fn needed(cfg: &crate::config::Config) -> Vec<Need> {
                 }
             }
         }
+        // 出向用我的音色：只有出向在跑、对方语言是中/英时才需要
+        if !cfg.tts.clone_voice.trim().is_empty()
+            && cfg.tts.provider != "none"
+            && dirs_active.iter().any(|d| d.0.code == cfg.mine().code && d.1.code == cfg.theirs().code)
+            && crate::voice_clone::supports(cfg.theirs().code)
+            && !crate::voice_clone::model_ready()
+        {
+            push("zipvoice".into(), "我的音色（克隆模型）".into(), 170);
+        }
         if cfg.tts.provider == "sherpa" {
             for &l in &spoken {
                 let dir = models.join("piper").join(l.code);
@@ -361,6 +371,7 @@ pub fn fetch(id: &str) -> Result<()> {
         "marian" => download_marian(),
         "zipformer" => download_zipformer(),
         "aec" => download_aec(),
+        "zipvoice" => download_zipvoice(),
         other => {
             if let Some(code) = other.strip_prefix("piper:") {
                 return download_piper(code);
@@ -387,6 +398,36 @@ pub fn download_sensevoice() -> Result<()> {
         |name| !name.starts_with("test_wavs"),
     )?;
     println!("SenseVoice 模型已就绪: {}", target.display());
+    Ok(())
+}
+
+/// ZipVoice 零样本克隆（中英，int8 蒸馏版，含 espeak-ng 英文发音数据）+ Vocos 声码器。
+/// 声码器最后下，缺了它 `voice_clone::model_ready()` 是 false，下次会补齐。
+pub fn download_zipvoice() -> Result<()> {
+    let base = crate::config::default_models_dir();
+    let target = crate::voice_clone::model_dir();
+    let has_core = target.join("tokens.txt").is_file()
+        && target.join("lexicon.txt").is_file()
+        && target.join("espeak-ng-data").is_dir()
+        && std::fs::read_dir(&target)
+            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with("decoder")))
+            .unwrap_or(false);
+    if !has_core {
+        extract_tarball(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2",
+            &base.join("zipvoice.tar.bz2"),
+            &target,
+            |name| !name.starts_with("test_wavs"),
+        )?;
+    }
+    let vocoder = target.join("vocos_24khz.onnx");
+    if !vocoder.is_file() {
+        download(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx",
+            &vocoder,
+        )?;
+    }
+    println!("克隆模型已就绪: {}", target.display());
     Ok(())
 }
 

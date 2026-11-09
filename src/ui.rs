@@ -611,6 +611,10 @@ pub fn run_settings(cfg: crate::config::Config, path: String, autostart: bool) -
                 auto_note: None,
                 update: Arc::new(Mutex::new(UpdateState::Idle)),
                 update_scheduled: false,
+                voice_rec: None,
+                voice_name: String::new(),
+                voice_msg: String::new(),
+                voices: crate::voice_clone::list(),
             };
             app.auto_pick_meeting();
             Ok(Box::new(app))
@@ -690,6 +694,11 @@ struct SettingsApp {
     update: Arc<Mutex<UpdateState>>,
     /// 本次启动的自动检查已经安排过
     update_scheduled: bool,
+    /// 「我的音色」：正在录的音、新音色名、提示信息、已有音色（增删后刷新）
+    voice_rec: Option<crate::voice_clone::MicRecorder>,
+    voice_name: String,
+    voice_msg: String,
+    voices: Vec<String>,
 }
 
 /// 开发用：设 SIMULVOICE_UI_SNAPSHOT=<文件.bmp>，窗口启动若干秒后（SIMULVOICE_UI_SNAPSHOT_DELAY，
@@ -787,13 +796,16 @@ impl SettingsApp {
 
     fn refresh_needs(&mut self) {
         let key = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.cfg.languages.mine,
             self.cfg.languages.theirs,
             self.cfg.stt.provider,
             self.cfg.translate.provider,
             self.cfg.tts.provider,
-            self.cfg.realtime.provider
+            self.cfg.realtime.provider,
+            self.cfg.tts.clone_voice,
+            self.cfg.audio.mode,
+            self.cfg.audio.duplex
         );
         if key != self.needs_key {
             self.needs_key = key;
@@ -1636,6 +1648,144 @@ impl SettingsApp {
         });
     }
 
+    /// 「我的音色」：录一段自己的声音，出向译文用它朗读
+    fn my_voice_card(&mut self, ui: &mut egui::Ui) {
+        use crate::voice_clone as vc;
+        let theirs = self.cfg.theirs();
+        card(ui, "我的音色", |ui| {
+            ui.label(
+                RichText::new("对方听到的译文用你自己的声音念（本地克隆，只能说中文和英文）")
+                    .size(12.0)
+                    .color(MUTED),
+            );
+            egui::Grid::new("myvoice").num_columns(2).min_col_width(LABEL_W).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("对方听到");
+                let label_of = |n: &str| match vc::profile_lang(n) {
+                    Some("zh") => format!("{n}（中文录音）"),
+                    Some(_) => format!("{n}（英文录音）"),
+                    None => n.to_string(),
+                };
+                let current = if self.cfg.tts.clone_voice.is_empty() {
+                    "内置音色".to_string()
+                } else {
+                    label_of(&self.cfg.tts.clone_voice)
+                };
+                combo("clonevoice").selected_text(current).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.cfg.tts.clone_voice, String::new(), "内置音色");
+                    for n in &self.voices {
+                        ui.selectable_value(&mut self.cfg.tts.clone_voice, n.clone(), label_of(n));
+                    }
+                });
+                ui.end_row();
+            });
+            let chosen = self.cfg.tts.clone_voice.clone();
+            if !chosen.is_empty() {
+                let warn = if !vc::supports(theirs.code) {
+                    Some(format!("对方说{}，我的音色只能说中/英文，开会时会用内置音色", theirs.label))
+                } else if !vc::exists(&chosen) {
+                    Some(format!("找不到音色「{chosen}」，开会时会用内置音色"))
+                } else if vc::profile_lang(&chosen) != Some(theirs.code) {
+                    Some(format!("这个音色不是用{0}录的，说{0}会偏慢、吐字不清，建议照{0}提示重录", theirs.label))
+                } else if !vc::model_ready() {
+                    Some("首次使用需下载克隆模型（约 170 MB），开始翻译前会提示".to_string())
+                } else {
+                    None
+                };
+                if let Some(w) = warn {
+                    ui.label(RichText::new(w).size(12.0).color(WARN_FG));
+                }
+            }
+
+            // 录音念对方语言（不是中/英时念英文）
+            let prompt = vc::prompt_for(theirs.code);
+            if let Some(rec) = &self.voice_rec {
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+                ui.label(RichText::new("照着念（平常开会的语气）：").size(12.5));
+                egui::Frame::none().fill(TILE).rounding(8.0).inner_margin(10.0).show(ui, |ui| {
+                    ui.label(RichText::new(prompt).size(14.0));
+                });
+                let secs = rec.seconds();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("● {secs:.0} 秒")).color(DANGER));
+                    ui.add(egui::ProgressBar::new((rec.level() * 3.0).min(1.0)).desired_width(160.0));
+                });
+                // 到 MAX_RECORD_SECS 自动收尾
+                let mut done = rec.full();
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    if ui.add(pill_button(RichText::new("念完了，保存").size(12.5).color(Color32::WHITE), INK)).clicked() {
+                        done = true;
+                    }
+                    if ui.add(pill_button(RichText::new("取消").size(12.5).color(TEXT), CARD)).clicked() {
+                        cancel = true;
+                    }
+                });
+                if cancel {
+                    self.voice_rec = None;
+                    self.voice_msg = "已取消录音".into();
+                } else if done {
+                    if let Some(rec) = self.voice_rec.take() {
+                        let (samples, rate) = rec.finish();
+                        let name = self.voice_name.trim().to_string();
+                        let result = vc::prepare(&samples, rate).and_then(|clip| {
+                            vc::save(&name, &clip, rate, prompt).map(|_| clip.len() as f32 / rate as f32)
+                        });
+                        self.voice_msg = match result {
+                            Ok(secs) => {
+                                self.voices = vc::list();
+                                self.cfg.tts.clone_voice = name.clone();
+                                format!("已保存音色「{name}」（{secs:.1} 秒），已选用")
+                            }
+                            Err(e) => format!("没保存：{e}"),
+                        };
+                    }
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.voice_name)
+                            .hint_text("给音色起个名字")
+                            .desired_width(150.0),
+                    );
+                    if ui.add(pill_button(RichText::new("录一段我的声音").size(12.5).color(TEXT), CARD)).clicked() {
+                        self.voice_msg = match vc::validate_name(&self.voice_name) {
+                            Err(e) => e.to_string(),
+                            Ok(_) => match vc::MicRecorder::start(&self.cfg.audio.mic_device) {
+                                Ok(r) => {
+                                    self.voice_rec = Some(r);
+                                    String::new()
+                                }
+                                Err(e) => format!("打不开麦克风：{e}"),
+                            },
+                        };
+                    }
+                    if !chosen.is_empty()
+                        && ui.add(pill_button(RichText::new("删除所选").size(12.5).color(DANGER), CARD)).clicked()
+                    {
+                        self.voice_msg = match vc::delete(&chosen) {
+                            Ok(_) => format!("已删除音色「{chosen}」"),
+                            Err(e) => format!("删除失败：{e}"),
+                        };
+                        self.voices = vc::list();
+                        self.cfg.tts.clone_voice.clear();
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "点录音后照提示念一段{}（约 10 秒，最长 {} 秒），安静的地方效果最好",
+                        if theirs.code == "zh" { "中文" } else { "英文" },
+                        vc::MAX_RECORD_SECS
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
+                );
+            }
+            if !self.voice_msg.is_empty() {
+                ui.label(RichText::new(&self.voice_msg).size(12.0).color(MUTED));
+            }
+        });
+    }
+
     fn advanced_body(&mut self, ui: &mut egui::Ui) {
         card(ui, "引擎", |ui| {
             egui::Grid::new("engines").num_columns(2).min_col_width(LABEL_W).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -1686,8 +1836,17 @@ impl SettingsApp {
                     ("volcengine", "火山引擎"),
                 ]);
                 ui.end_row();
+                if self.cfg.realtime.provider == "palabra" {
+                    ui.label("我的声音");
+                    ui.checkbox(&mut self.cfg.realtime.voice_cloning, "对方听到我自己的音色（Palabra 实时克隆）");
+                    ui.end_row();
+                }
             });
         });
+        // Gemini Live / Palabra 自己出声，用不到本地朗读
+        if !matches!(self.cfg.realtime.provider.as_str(), "gemini-live" | "palabra") {
+            self.my_voice_card(ui);
+        }
         if self.cfg.tts.provider == "edge" {
             let (mine, theirs) = (self.cfg.mine(), self.cfg.theirs());
             card(ui, "音色", |ui| {

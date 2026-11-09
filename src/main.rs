@@ -33,6 +33,7 @@ mod tts;
 mod update;
 mod ui;
 mod vad;
+mod voice_clone;
 mod volc;
 mod volctest;
 
@@ -307,7 +308,94 @@ fn tts_for(base: &config::TtsConfig, voice: &str, l: &lang::Lang) -> config::Tts
     let mut t = base.clone();
     t.voice = voice.to_string();
     t.model_dir = local_tts_dir(&base.model_dir, l).display().to_string();
+    // 「我的音色」只给出向，由 clone_voice_for 单独打开
+    t.clone_voice = String::new();
     t
+}
+
+/// 出向要不要用「我的音色」：开了、对方语言是中/英、模型和音色都在才用，否则说明原因并退回内置音色。
+fn clone_voice_for(cfg: &Config) -> String {
+    let name = cfg.tts.clone_voice.trim();
+    if name.is_empty() || cfg.tts.provider == "none" {
+        return String::new();
+    }
+    let theirs = cfg.theirs();
+    let why = if !voice_clone::supports(theirs.code) {
+        format!("我的音色只能说中文和英文，{}译文改用内置音色", theirs.label)
+    } else if !voice_clone::model_ready() {
+        "克隆模型没下载（simulvoice models zipvoice），出向改用内置音色".to_string()
+    } else if !voice_clone::exists(name) {
+        format!("找不到音色「{name}」，出向改用内置音色")
+    } else {
+        eprintln!("[出向] 用我的音色「{name}」朗读");
+        if voice_clone::profile_lang(name) != Some(theirs.code) {
+            eprintln!(
+                "[出向] 注意：音色「{name}」不是用{}录的，说{}会偏慢、吐字不清，建议照{}提示重录一个",
+                theirs.label, theirs.label, theirs.label
+            );
+        }
+        return name.to_string();
+    };
+    eprintln!("[出向] {why}");
+    String::new()
+}
+
+/// 「我的音色」引擎。没开或加载失败返回 None，调用方照常用内置音色。
+fn build_clone_tts(cfg: &config::TtsConfig, label: &str) -> Option<voice_clone::CloneTts> {
+    if cfg.clone_voice.trim().is_empty() {
+        return None;
+    }
+    // clone_steps 已由出向按译文语言换算好（0 只会出现在没经过 clone_voice_for 的配置里）
+    let steps = voice_clone::steps_for(cfg.clone_steps, "en");
+    match voice_clone::CloneTts::new(&cfg.clone_voice, &cfg.onnx_provider, steps) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("[{label}] 我的音色不可用（{e}），改用内置音色");
+            None
+        }
+    }
+}
+
+/// 用「我的音色」念一段。还没出声就失败时返回 Err，让调用方整句改用内置音色；
+/// 念到一半失败则停在这里（不重念前半句）。
+fn speak_clone(
+    engine: &voice_clone::CloneTts,
+    sink: &rodio::Sink,
+    monitor: Option<&rodio::Sink>,
+    stop_gen: &mut u64,
+    text: &str,
+) -> Result<()> {
+    let mut played = false;
+    for clause in tts::split_clauses(text) {
+        let generation = STOP_TTS_GEN.load(Ordering::SeqCst);
+        if generation != *stop_gen {
+            *stop_gen = generation;
+            sink.stop();
+            sink.play();
+            return Ok(());
+        }
+        if hotkeys::MUTE_TTS.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let (samples, rate) = match engine.render(&clause) {
+            Ok(v) => v,
+            Err(e) if !played => return Err(e),
+            Err(e) => {
+                eprintln!("[我的音色] {e}，本句剩余部分跳过");
+                break;
+            }
+        };
+        played = true;
+        if let Some(m) = monitor {
+            m.append(rodio::buffer::SamplesBuffer::new(1, rate, samples.clone()));
+        }
+        sink.append(rodio::buffer::SamplesBuffer::new(1, rate, samples));
+    }
+    sink.sleep_until_end();
+    if let Some(m) = monitor {
+        m.sleep_until_end();
+    }
+    Ok(())
 }
 
 fn doctor(args: &[String]) -> Result<()> {
@@ -596,6 +684,129 @@ pub(crate) fn single_instance() -> bool {
         Err(_) => false,
     }
 }
+/// simulvoice voice …：录制/导入/试听/删除「我的音色」
+fn voice_cmd(args: &[String]) -> Result<()> {
+    let positional: Vec<&str> = {
+        let mut out = Vec::new();
+        let mut i = 2;
+        while i < args.len() {
+            if matches!(args[i].as_str(), "--config" | "--secs" | "--text" | "--out" | "--lang" | "--steps") {
+                i += 2;
+                continue;
+            }
+            out.push(args[i].as_str());
+            i += 1;
+        }
+        out
+    };
+    match args.get(1).map(String::as_str) {
+        Some("list") | None => {
+            let names = voice_clone::list();
+            if names.is_empty() {
+                println!("还没有音色。用 simulvoice voice record <名字> 录一个");
+            }
+            for n in names {
+                println!("  {n}");
+            }
+            println!(
+                "克隆模型：{}",
+                if voice_clone::model_ready() { "已就绪" } else { "未下载（simulvoice models zipvoice）" }
+            );
+            Ok(())
+        }
+        Some("record") => {
+            let name = positional.first().ok_or_else(|| anyhow!("用法: simulvoice voice record <名字>"))?;
+            voice_clone::validate_name(name)?;
+            let cfg = Config::load(flag(args, "--config").as_deref())?;
+            let secs: u32 = flag(args, "--secs")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15)
+                .clamp(5, voice_clone::MAX_RECORD_SECS);
+            // 念译文的语言（对方语言）；不是中/英时念英文
+            let lang = flag(args, "--lang").unwrap_or_else(|| cfg.theirs().code.to_string());
+            let prompt = voice_clone::prompt_for(&lang);
+            println!("请用平常开会的语气念下面这段（最长 {secs} 秒，念完按回车）：
+
+  {prompt}
+");
+            for n in (1..=3).rev() {
+                println!("{n}…");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            let rec = voice_clone::MicRecorder::start(&cfg.audio.mic_device)?;
+            println!("● 录音中");
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                let _ = tx.send(());
+            });
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(secs as u64) && !rec.full() {
+                if rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+                    break;
+                }
+            }
+            let (samples, rate) = rec.finish();
+            let trimmed = voice_clone::prepare(&samples, rate)?;
+            voice_clone::save(name, &trimmed, rate, prompt)?;
+            println!(
+                "已保存音色「{name}」（{:.1} 秒）。在设置里「我的音色」选它，或在配置里写 clone_voice = \"{name}\"",
+                trimmed.len() as f32 / rate as f32
+            );
+            Ok(())
+        }
+        Some("import") => {
+            let (Some(name), Some(wav)) = (positional.first(), positional.get(1)) else {
+                return Err(anyhow!("用法: simulvoice voice import <名字> <wav> --text <录音里念的字>"));
+            };
+            let text = flag(args, "--text").ok_or_else(|| anyhow!("需要 --text：录音里念的是什么（参考文字不对，克隆效果会差很多）"))?;
+            voice_clone::import(name, std::path::Path::new(wav), &text)?;
+            println!("已导入音色「{name}」");
+            Ok(())
+        }
+        Some("delete") => {
+            let name = positional.first().ok_or_else(|| anyhow!("用法: simulvoice voice delete <名字>"))?;
+            voice_clone::delete(name)?;
+            println!("已删除音色「{name}」");
+            Ok(())
+        }
+        Some("test") => {
+            let name = positional.first().ok_or_else(|| anyhow!("用法: simulvoice voice test <名字> [文字]"))?;
+            let text = if positional.len() > 1 {
+                positional[1..].join(" ")
+            } else {
+                "Thanks for the update. I think we can move the release to next Friday.".to_string()
+            };
+            let steps = flag(args, "--steps")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| voice_clone::steps_for(0, voice_clone::text_lang(&text)) as u32);
+            let t0 = std::time::Instant::now();
+            let engine = voice_clone::CloneTts::new(name, "cpu", steps as i32)?;
+            println!("加载 {:.2} 秒", t0.elapsed().as_secs_f32());
+            let mut all: Vec<f32> = Vec::new();
+            let mut rate = 24_000;
+            for clause in tts::split_clauses(&text) {
+                let t = std::time::Instant::now();
+                let (samples, r) = engine.render(&clause)?;
+                let gen = t.elapsed().as_secs_f32();
+                let dur = samples.len() as f32 / r as f32;
+                println!("  {clause}  → 合成 {gen:.2}s / 音频 {dur:.2}s（RTF {:.2}）", gen / dur.max(0.01));
+                rate = r;
+                all.extend(samples);
+            }
+            if let Some(out) = flag(args, "--out") {
+                tts::write_wav(&out, &all, rate)?;
+                println!("已保存 {out}");
+            } else {
+                sink::play_pcm(&all, rate, None)?;
+            }
+            Ok(())
+        }
+        Some(other) => Err(anyhow!("未知 voice 子命令: {other}（list|record|import|test|delete）")),
+    }
+}
+
 fn help() {
     println!(
         r#"SimulVoice 0.45.0 — 实时同传（Rust 原生）
@@ -610,6 +821,12 @@ fn help() {
   simulvoice models silero                    Silero VAD 模型（本地识别用）
   simulvoice models sensevoice                SenseVoice int8 本地识别模型（ONNX）
   simulvoice models piper <zh|en>              Piper 本地 TTS 模型（离线）
+  simulvoice models zipvoice                  我的音色用的克隆模型（中/英，约 170 MB）
+  simulvoice voice list                       列出已录的音色
+  simulvoice voice record <名字> [--secs N] [--lang zh|en]  录一段自己的声音（照提示念对方语言）
+  simulvoice voice import <名字> <wav> --text <录音里念的字>
+  simulvoice voice test <名字> [文字] [--steps N] [--out x.wav]  用该音色合成并显示耗时
+  simulvoice voice delete <名字>
   simulvoice vadcheck <音频>                  检查 Silero VAD 切分
   simulvoice livetest <音频>                  Gemini Live 端到端翻译测试
   simulvoice palabratest <音频>               Palabra.ai 端到端翻译测试
@@ -856,6 +1073,7 @@ fn run_cli() -> Result<()> {
             Some("nllb") => models::download_nllb(),
             Some("whisper") => models::download_whisper(),
             Some("aec") => models::download_aec(),
+            Some("zipvoice") => models::download_zipvoice(),
             Some("piper") => {
                 let lang = args.get(2).map(String::as_str).unwrap_or("zh");
                 models::download_piper(lang)
@@ -867,6 +1085,7 @@ fn run_cli() -> Result<()> {
             Some(other) => Err(anyhow!("未知模型类型: {other}")),
         },
         Some("vadcheck") => vad_check(&args),
+        Some("voice") => voice_cmd(&args),
         Some("capturetest") => capture_test(&args),
         Some("livetest") => livetest::run(&args),
         Some("multitest") => {
@@ -926,6 +1145,7 @@ fn run_cli() -> Result<()> {
             speak_text(
                 &tts_cfg,
                 sherpa.as_ref(),
+                None,
                 &mut edge,
                 &mut cache,
                 &sink,
@@ -1402,6 +1622,8 @@ struct RealtimePipe {
     aec_filter_ms: u32,
     aec_ref: Option<capture::Source>,
     extras: Vec<(String, Box<dyn translate::Translator>)>,
+    /// Palabra 用我的音色（只在出向开）
+    voice_cloning: bool,
 }
 
 struct Pipe {
@@ -1586,6 +1808,7 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
         let monitor = monitor_sink_thread.clone();
         std::thread::spawn(move || {
             let sherpa = build_local_tts(&tts_cfg, label);
+            let clone = build_clone_tts(&tts_cfg, label);
             let mut edge_conn: Option<edge_tts::EdgeTtsConn> = None;
             let mut tts_cache: std::collections::HashMap<String, Vec<u8>> =
                 std::collections::HashMap::new();
@@ -1600,6 +1823,7 @@ fn run_pipeline(mut p: Pipe) -> Result<()> {
                 let result = speak_text(
                     &tts_cfg,
                     sherpa.as_ref(),
+                    clone.as_ref(),
                     &mut edge_conn,
                     &mut tts_cache,
                     &tts_sink,
@@ -1957,6 +2181,7 @@ fn build_local_tts(cfg: &config::TtsConfig, label: &str) -> Option<tts::SherpaTt
 fn speak_text(
     cfg: &config::TtsConfig,
     sherpa: Option<&tts::SherpaTts>,
+    clone: Option<&voice_clone::CloneTts>,
     edge: &mut Option<edge_tts::EdgeTtsConn>,
     cache: &mut std::collections::HashMap<String, Vec<u8>>,
     sink: &rodio::Sink,
@@ -1968,6 +2193,12 @@ fn speak_text(
         return Ok(());
     }
     let _duck = DuckGuard::new(cfg.provider != "none" && DUCK.load(Ordering::SeqCst));
+    if let (Some(engine), false) = (clone, cfg.provider == "none") {
+        match speak_clone(engine, sink, monitor, stop_gen, text) {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("[我的音色] {e}，这句改用内置音色"),
+        }
+    }
     match cfg.provider.as_str() {
         "none" => Ok(()),
         "sapi" => tts::speak_sapi(text, Some(&cfg.voice)),
@@ -2159,6 +2390,7 @@ fn run_realtime(
             target: rt.target_lang.clone(),
             voice: rt.voice.clone(),
             speech: true,
+            voice_cloning: rt.voice_cloning,
         };
         let started = std::time::Instant::now();
         let mut src_buf = String::new();
@@ -2324,6 +2556,7 @@ fn run_realtime(
                 } else {
                     None
                 };
+                let clone = build_clone_tts(&cfg_w, label);
                 let mut edge_conn: Option<edge_tts::EdgeTtsConn> = None;
                 let mut tts_cache: std::collections::HashMap<String, Vec<u8>> =
                     std::collections::HashMap::new();
@@ -2345,6 +2578,7 @@ fn run_realtime(
                     let result = speak_text(
                         &cfg_w,
                         sherpa.as_ref(),
+                        clone.as_ref(),
                         &mut edge_conn,
                         &mut tts_cache,
                         &sink_w,
@@ -2911,6 +3145,7 @@ pub(crate) fn run_session(
                     None
                 },
                 extras: build_extras(&cfg, &cfg.languages.theirs),
+                voice_cloning: false,
             })
         } else {
             None
@@ -2967,7 +3202,9 @@ pub(crate) fn run_session(
     out_stt_cfg.language = cfg.stt.language_reverse.clone();
     let mut out_tr_cfg = cfg.translate.clone();
     out_tr_cfg.target = cfg.translate.target_reverse.clone();
-    let out_tts_cfg = tts_for(&cfg.tts, &cfg.tts.voice_reverse, cfg.theirs());
+    let mut out_tts_cfg = tts_for(&cfg.tts, &cfg.tts.voice_reverse, cfg.theirs());
+    out_tts_cfg.clone_voice = clone_voice_for(&cfg);
+    out_tts_cfg.clone_steps = voice_clone::steps_for(cfg.tts.clone_steps, cfg.theirs().code) as u32;
 
     if cfg.audio.remote_output_device.trim().is_empty() {
         eprintln!("[警告] duplex=true 但 remote_output_device 为空，译文会走默认设备，可能被再次采集。建议填 \"CABLE\"。");
@@ -3044,6 +3281,7 @@ pub(crate) fn run_session(
                     None
                 },
                 extras: build_extras(&cfg, &cfg.languages.mine),
+                voice_cloning: live_palabra && cfg.realtime.voice_cloning,
             })
         } else {
             None

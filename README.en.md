@@ -11,6 +11,7 @@ Simultaneous interpretation for meetings on Windows. SimulVoice listens to your 
 - **Listens to the meeting app only**: capture just Tencent Meeting, Teams, Zoom, DingTalk, Feishu or a browser, so other apps don't get in
 - **No translation when a colleague speaks your language**: in a mixed meeting, a remark in your own language is shown as-is instead of being mis-recognized as the other language
 - **Speech output**: Edge (free, online), Piper (offline), Windows SAPI, OpenAI
+- **My voice** (optional): record a short sample and the other side hears your translation in your own voice (local cloning, Chinese/English)
 - **End-to-end realtime engines**: Gemini Live, Palabra.ai, Volcengine
 - **Audio processing**: noise suppression, Silero VAD, echo cancellation, automatic gain, ducking other audio while speaking
 - **Everyday use**: minimize to tray, global hotkeys, bilingual subtitles, recording and playback, transcript export, update check, crash dumps
@@ -76,10 +77,25 @@ simulvoice models marian           # MT: Chinese <-> English (~250 MB per direct
 simulvoice models marian ja-en     # MT: any opus-mt language pair
 simulvoice models nllb             # MT: 200-language fallback (~0.9 GB, slower)
 simulvoice models piper de         # offline voices, per language
+simulvoice models zipvoice         # my voice: cloning model (zh/en, ~170 MB)
 simulvoice models silero           # Silero VAD
 ```
 
 Translation route: a direct Marian pair when one exists (about 0.2–0.6 s per sentence); a pivot through English when both sides pair with English (about 0.6–0.9 s); NLLB otherwise (2–5 s). For higher quality, switch to Gemini or OpenAI in advanced settings.
+
+## My voice
+
+In two-way mode the other side hears a built-in voice by default. To have them hear your own voice:
+
+1. Advanced settings → My voice (我的音色): enter a name, click Record (录一段我的声音), read the prompt aloud (about 10 seconds), then click Save (念完了，保存);
+2. Pick that voice under "They hear" (对方听到). The cloning model (~170 MB) downloads on first use.
+
+- **Read the prompt in the other side's language**: if they speak English, read the English prompt. A Chinese sample used for English output comes out slow and slurred
+- Chinese and English output only. For other languages, a missing model, or a synthesis error, SimulVoice falls back to the built-in voice
+- Fully local. Each sentence starts 1–3 s later than with Edge (12-thread CPU: synthesis takes about 0.65× the audio length for English, 0.5× for Chinese), so it keeps up without a growing backlog
+- It reproduces your timbre and overall speaking style, not your emotion sentence by sentence
+- CLI: `simulvoice voice record|import|test|list|delete`; `[tts] clone_steps` sets sampling steps (0 = auto; higher is finer and slower)
+- With the Palabra realtime engine, tick "They hear my own voice" (对方听到我自己的音色) in Advanced settings instead: Palabra clones your voice live in the cloud, no recording needed
 
 ## Command line
 
@@ -166,5 +182,6 @@ Models downloaded on demand carry their own licenses, independent of SimulVoice'
 | SenseVoice | recognition of zh/en/ja/ko/yue | see FunASR's model license |
 | Silero VAD | voice activity detection | MIT |
 | Piper voices | offline speech | varies per voice; see each voice card |
+| ZipVoice + Vocos | my voice (cloning) | code Apache-2.0 / MIT; the ZipVoice model is trained on Emilia (CC-BY-NC 4.0), check before commercial use |
 | Edge read-aloud | online speech | undocumented Microsoft endpoint; not advisable for commercial products |
 | VB-CABLE | virtual microphone | see VB-Audio's terms of use |

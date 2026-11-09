@@ -50,6 +50,8 @@ pub struct PalabraConfig {
     pub target: String,
     pub voice: String,
     pub speech: bool,
+    /// 用说话人自己的音色朗读译文（Palabra 云端实时克隆）
+    pub voice_cloning: bool,
 }
 
 fn set_task(cfg: &PalabraConfig) -> Value {
@@ -76,7 +78,7 @@ fn set_task(cfg: &PalabraConfig) -> Value {
                     "target_language": lang_code_owned(&cfg.target),
                     "translate_partial_transcriptions": true,
                     "speech_generation": {
-                        "voice_cloning": false,
+                        "voice_cloning": cfg.voice_cloning,
                         "voice_id": if cfg.voice.is_empty() { "default_low" } else { &cfg.voice },
                         "voice_timbre_detection": {
                             "enabled": false,

@@ -89,6 +89,11 @@ pub struct TtsConfig {
     pub onnx_provider: String,
     /// 本地 TTS 线程数
     pub threads: u32,
+    /// 出向译文用「我的音色」朗读：data/voices 下的音色名，空 = 关（用上面的内置音色）。
+    /// 只作用于出向；对方语言不是中/英、模型没下载、音色缺失时自动退回内置音色
+    pub clone_voice: String,
+    /// 我的音色采样步数：0 = 自动（中文 3、英文 2），越大越细腻也越慢
+    pub clone_steps: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -254,6 +259,8 @@ impl Default for TtsConfig {
             model_dir: default_models_dir().join("tts").display().to_string(),
             onnx_provider: "cpu".into(),
             threads: 2,
+            clone_voice: String::new(),
+            clone_steps: 0,
         }
     }
 }
@@ -340,6 +347,8 @@ pub struct RealtimeConfig {
     pub voice: String,
     pub voice_reverse: String,
     pub output_device: String,
+    /// Palabra 出向用我的实时音色（云端从我说话中克隆，无需录音）
+    pub voice_cloning: bool,
 }
 
 impl Default for RealtimeConfig {
@@ -350,6 +359,7 @@ impl Default for RealtimeConfig {
             voice: "Puck".into(),
             voice_reverse: "Puck".into(),
             output_device: String::new(),
+            voice_cloning: false,
         }
     }
 }
@@ -569,6 +579,8 @@ rate = "+0%"
 model_dir = ""                 # 本地 TTS 模型目录（空=数据目录/models/tts）
 onnx_provider = "cpu"          # 本地 ONNX provider（DirectML 需自定义构建）
 threads = 2                    # 本地 TTS 线程数
+clone_voice = ""               # 出向用我的音色（simulvoice voice record <名字> 录制；空=关）
+clone_steps = 0                # 我的音色采样步数（0=自动：中文 3、英文 2；越大越细腻越慢）
 
 [audio]
 input = "loopback"             # loopback | pid | mic
@@ -629,6 +641,7 @@ model = "models/gemini-3.8-live"
 voice = "Puck"
 voice_reverse = "Puck"
 output_device = ""
+voice_cloning = false          # Palabra 出向用我的实时音色
 
 [profiles]
 # 前台进程 → 配置文件（simulvoice watch 使用）

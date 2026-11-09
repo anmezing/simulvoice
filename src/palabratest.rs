@@ -51,6 +51,7 @@ pub fn run(args: &[String]) -> Result<()> {
         target: cfg.translate.target.clone(),
         voice: "default_low".into(),
         speech: true,
+        voice_cloning: cfg.realtime.voice_cloning,
     };
     println!(
         "[palabra] {} → {} / {} 采样",

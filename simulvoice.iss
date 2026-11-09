@@ -1,8 +1,8 @@
 ﻿[Setup]
 AppId={{8F3B2E54-6C1D-4B7A-9E2F-3A5C7D1B4E60}
 AppName=SimulVoice
-AppVersion=0.45.0
-AppVerName=SimulVoice 0.45.0
+AppVersion=0.46.0
+AppVerName=SimulVoice 0.46.0
 AppPublisher=SimulVoice
 DefaultDirName={localappdata}\Programs\SimulVoice
 DefaultGroupName=SimulVoice
@@ -10,7 +10,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=dist
-OutputBaseFilename=SimulVoiceSetup-0.45.0
+OutputBaseFilename=SimulVoiceSetup-0.46.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

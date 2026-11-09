@@ -24,13 +24,14 @@ if (Test-Path "target\release\onnxruntime_marian.dll") { Copy-Item "target\relea
 Copy-Item "README.md" $stage
 Copy-Item "README.en.md" $stage
 Copy-Item "LICENSE" "$stage\LICENSE.txt"
-& "target\release\simulvoice.exe" write-icon "$stage\simulvoice.ico"
-if ($LASTEXITCODE -ne 0) { throw "write-icon failed" }
+# simulvoice.exe is a GUI-subsystem app: "&" returns before it finishes, so wait for it explicitly
+$p = Start-Process "target\release\simulvoice.exe" -ArgumentList "write-icon", "$stage\simulvoice.ico" -Wait -PassThru -NoNewWindow
+if ($p.ExitCode -ne 0 -or -not (Test-Path "$stage\simulvoice.ico")) { throw "write-icon failed (exit $($p.ExitCode))" }
 Set-Content -Path "$stage\simulvoice.data-dir" -Value "data" -Encoding ascii -NoNewline
 
 & $Iscc "simulvoice.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-Write-Host "Installer: dist\SimulVoiceSetup-0.45.0.exe"
+Write-Host "Installer: dist\SimulVoiceSetup-0.46.0.exe"
 
 
 

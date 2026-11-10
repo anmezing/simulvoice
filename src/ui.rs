@@ -508,6 +508,63 @@ fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[Stri
         });
 }
 
+/// Edge 音色下拉。空值就是该语言的默认音色，所以不再单列一条「空」（以前默认音色会出现两次）。
+/// `mine`：出向时传入已录的「我的音色」和 clone_voice。选我的音色时 Edge 音色保留，
+/// 作为对方语言不支持或合成失败时的兜底；选 Edge 音色则关掉我的音色。
+fn voice_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut String,
+    lang: &crate::lang::Lang,
+    mine: Option<(&[String], &mut String)>,
+) {
+    let edge: Vec<&str> = crate::lang::edge_voices(lang.code);
+    let effective = if value.trim().is_empty() { lang.edge_voice.to_string() } else { value.clone() };
+    let (voices, clone): (&[String], Option<&mut String>) = match mine {
+        Some((v, c)) => (v, Some(c)),
+        None => (&[], None),
+    };
+    let chosen_clone = clone.as_ref().map(|c| c.to_string()).filter(|c| !c.is_empty());
+    let label = match &chosen_clone {
+        Some(n) => format!("我的音色：{n}"),
+        None => effective.clone(),
+    };
+    let mut pick_edge: Option<String> = None;
+    let mut pick_clone: Option<String> = None;
+    combo(id).width(220.0).selected_text(label).show_ui(ui, |ui| {
+        if clone.is_some() {
+            for n in voices {
+                if ui.selectable_label(chosen_clone.as_deref() == Some(n.as_str()), format!("我的音色：{n}")).clicked() {
+                    pick_clone = Some(n.clone());
+                }
+            }
+            if voices.is_empty() {
+                ui.label(RichText::new("还没录我的音色（见上方「我的音色」）").size(12.0).color(MUTED));
+            }
+            ui.separator();
+        }
+        let mut shown: Vec<&str> = edge.clone();
+        if !shown.contains(&effective.as_str()) {
+            shown.push(effective.as_str());
+        }
+        for v in shown {
+            if ui.selectable_label(chosen_clone.is_none() && v == effective, v).clicked() {
+                pick_edge = Some(v.to_string());
+            }
+        }
+    });
+    match (pick_clone, pick_edge, clone) {
+        (Some(n), _, Some(c)) => *c = n,
+        (None, Some(v), c) => {
+            *value = v;
+            if let Some(c) = c {
+                c.clear();
+            }
+        }
+        _ => {}
+    }
+}
+
 fn option_combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[(&str, &str)]) {
     let label = options
         .iter()
@@ -1852,12 +1909,17 @@ impl SettingsApp {
             card(ui, "音色", |ui| {
                 egui::Grid::new("voices").num_columns(2).min_col_width(LABEL_W).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label(format!("念给我（{}）", mine.label));
-                    let opts: Vec<String> = crate::lang::edge_voices(mine.code).iter().map(|s| s.to_string()).collect();
-                    device_combo(ui, "voice", &mut self.cfg.tts.voice, &opts, mine.edge_voice);
+                    voice_combo(ui, "voice", &mut self.cfg.tts.voice, mine, None);
                     ui.end_row();
                     ui.label(format!("念给对方（{}）", theirs.label));
-                    let opts: Vec<String> = crate::lang::edge_voices(theirs.code).iter().map(|s| s.to_string()).collect();
-                    device_combo(ui, "voicerev", &mut self.cfg.tts.voice_reverse, &opts, theirs.edge_voice);
+                    // 和「我的音色」卡片共用 clone_voice：两处选的是同一个设置
+                    voice_combo(
+                        ui,
+                        "voicerev",
+                        &mut self.cfg.tts.voice_reverse,
+                        theirs,
+                        Some((&self.voices, &mut self.cfg.tts.clone_voice)),
+                    );
                     ui.end_row();
                 });
             });

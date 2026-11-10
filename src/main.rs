@@ -809,7 +809,7 @@ fn voice_cmd(args: &[String]) -> Result<()> {
 
 fn help() {
     println!(
-        r#"SimulVoice 0.46.0 — 实时同传（Rust 原生）
+        r#"SimulVoice 0.46.1 — 实时同传（Rust 原生）
 
 用法:
   simulvoice run [--config <文件>]            同传：采集 → 识别 → 翻译 → 朗读
